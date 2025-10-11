@@ -1,0 +1,25 @@
+# Core Dependencies
+langchain>=0.1.0
+langgraph>=0.0.40
+langchain-openai>=0.0.5
+python-dotenv>=1.0.0
+
+# Web Scraping
+beautifulsoup4>=4.12.0
+selenium>=4.15.0
+scholarly>=1.7.11
+arxiv>=2.1.0
+requests>=2.31.0
+
+# Data Processing
+pandas>=2.1.0
+numpy>=1.24.0
+
+# Web Interface
+streamlit>=1.29.0
+streamlit-chat>=0.1.1
+
+# Utilities
+pydantic>=2.5.0
+tenacity>=8.2.3
+python-dateutil>=2.8.2
