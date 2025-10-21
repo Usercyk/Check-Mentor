@@ -270,17 +270,54 @@ class PaperRAGProcessor:
         
         # 如果没有提供论文全文，从向量库检索相关内容
         if paper_text is None and self.vectorstore is not None:
-            # 检索该论文的所有块
-            results = self.vectorstore.similarity_search(
-                query="",
-                k=50,
-                filter={"paper_id": paper_id}
+            # 优先检索论文主要内容（abstract, introduction等），避免作者简介
+            # 先尝试获取高质量块（排除bio相关内容）
+            main_content_results = self.vectorstore.similarity_search(
+                query="research methods findings results conclusion abstract introduction",
+                k=20,
+                filter={"id": paper_id}  # 使用正确的元数据字段
             )
-            paper_text = "\n\n".join([doc.page_content for doc in results])
+            
+            # 过滤掉可能包含作者简介的块
+            filtered_chunks = []
+            for doc in main_content_results:
+                content = doc.page_content.lower()
+                # 排除包含作者信息、致谢、参考文献等非核心内容的块
+                if not any(keyword in content for keyword in [
+                    'author', 'biography', 'bio:', 'acknowledgment', 'reference', 'citation',
+                    'corresponding author', 'email:', 'affiliation', 'department'
+                ]):
+                    filtered_chunks.append(doc)
+            
+            # 如果过滤后块太少，补充一些块但标记为低质量
+            if len(filtered_chunks) < 5:
+                additional_results = self.vectorstore.similarity_search(
+                    query="",
+                    k=30,
+                    filter={"id": paper_id}  # 使用正确的元数据字段
+                )
+                # 添加未被过滤掉的块
+                for doc in additional_results:
+                    if doc not in filtered_chunks:
+                        filtered_chunks.append(doc)
+                        if len(filtered_chunks) >= 10:
+                            break
+            
+            paper_text = "\n\n".join([doc.page_content for doc in filtered_chunks[:15]])  # 限制块数量
+        
+        # 如果仍然没有内容，返回失败状态
+        if not paper_text or len(paper_text.strip()) < 100:
+            return {
+                "paper_id": paper_id,
+                "summary": "Unable to generate summary: insufficient paper content available",
+                "generated_at": datetime.now().isoformat(),
+                "status": "failed",
+                "reason": "insufficient_content"
+            }
         
         # 创建总结 prompt
         summary_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert academic paper summarizer. Provide concise and accurate summaries."),
+            ("system", "You are an expert academic paper summarizer. Provide concise and accurate summaries. If the content is insufficient or appears to be about author biography rather than research content, clearly state this limitation."),
             ("user", """Please summarize the following research paper in English. Include:
 1. Main research question/objective
 2. Key methods and approaches
@@ -290,20 +327,43 @@ class PaperRAGProcessor:
 Paper content:
 {paper_content}
 
-Provide a structured summary in 200-300 words.""")
+Provide a structured summary in 200-300 words. If this appears to be author biography or insufficient research content, please note this clearly.""")
         ])
         
         # 生成总结
         chain = summary_prompt | self.llm
-        response = chain.invoke({"paper_content": paper_text[:4000]})  # 限制长度
+        response = chain.invoke({"paper_content": paper_text[:6000]})  # 增加长度限制
+        
+        summary_text = response.content.strip()
+        
+        # 检测占位文本或低质量总结
+        placeholder_indicators = [
+            "please provide", "i need more", "insufficient", "cannot summarize",
+            "not enough information", "unable to", "content appears to be"
+        ]
+        
+        is_placeholder = any(indicator in summary_text.lower() for indicator in placeholder_indicators)
+        
+        # 如果检测到占位文本，尝试重试一次使用更多上下文
+        if is_placeholder and len(filtered_chunks) > 15:
+            print("⚠️ Detected placeholder summary, retrying with more context...")
+            extended_text = "\n\n".join([doc.page_content for doc in filtered_chunks[:25]])
+            response = chain.invoke({"paper_content": extended_text[:8000]})
+            summary_text = response.content.strip()
+            
+            # 再次检查
+            is_placeholder = any(indicator in summary_text.lower() for indicator in placeholder_indicators)
         
         summary = {
             "paper_id": paper_id,
-            "summary": response.content,
-            "generated_at": datetime.now().isoformat()
+            "summary": summary_text,
+            "generated_at": datetime.now().isoformat(),
+            "status": "success" if not is_placeholder else "warning",
+            "chunks_used": len(filtered_chunks) if 'filtered_chunks' in locals() else 0,
+            "content_quality": "high" if not is_placeholder else "low"
         }
         
-        print(f"✓ Summary generated")
+        print(f"✓ Summary generated (status: {summary['status']})")
         return summary
     
     def analyze_paper_relevance(
@@ -332,21 +392,62 @@ Provide a structured summary in 200-300 words.""")
         
         print(f"🔍 Analyzing relevance for question: {question_key}")
         
-        # 检索相关文本块（仅限该论文）
+        # 检索相关文本块（仅限该论文）- 改进查询以优先获取研究内容
+        # 使用更具体的查询，避免匹配参考文献
         retriever = self.vectorstore.as_retriever(
             search_kwargs={
                 "k": top_k,
-                "filter": {"id": paper_id}
+                "filter": {"id": paper_id}  # 使用正确的元数据字段
             }
         )
         
-        relevant_chunks = retriever.invoke(question)
+        research_queries = [
+            f"{question} research methods results analysis",
+            f"{question} experiment theory findings",
+            f"{question} abstract introduction conclusion"
+        ]
+        
+        all_relevant_chunks = []
+        seen_contents = set()
+        
+        for query in research_queries:
+            try:
+                chunks = retriever.invoke(query)
+                for chunk in chunks:
+                    content = chunk.page_content.strip()
+                    # 去重并过滤明显是参考文献的内容
+                    if content not in seen_contents and len(content) > 50:
+                        # 过滤掉明显的参考文献条目
+                        if not (content.count('et al.') > 2 or content.startswith(('1.', '2.', '3.', '['))):
+                            all_relevant_chunks.append(chunk)
+                            seen_contents.add(content)
+                            if len(all_relevant_chunks) >= top_k:
+                                break
+                if len(all_relevant_chunks) >= top_k:
+                    break
+            except Exception as e:
+                print(f"⚠️ Query failed: {query}, error: {e}")
+                continue
+        
+        # 如果没有找到足够的研究内容，回退到原始查询
+        if len(all_relevant_chunks) < 3:
+            print("⚠️ Insufficient research content found, falling back to general query")
+            fallback_chunks = retriever.invoke(question)
+            for chunk in fallback_chunks:
+                content = chunk.page_content.strip()
+                if content not in seen_contents and len(content) > 50:
+                    all_relevant_chunks.append(chunk)
+                    seen_contents.add(content)
+                    if len(all_relevant_chunks) >= top_k:
+                        break
+        
+        relevant_chunks = all_relevant_chunks[:top_k]
         
         # 同时获取相似度分数
         results_with_scores = self.vectorstore.similarity_search_with_score(
             query=question,
             k=top_k,
-            filter={"id": paper_id}
+            filter={"id": paper_id}  # 使用正确的元数据字段
         )
         
         # 计算平均相似度分数（Chroma 返回的是距离，越小越相似）
@@ -357,10 +458,66 @@ Provide a structured summary in 200-300 words.""")
         else:
             similarity_score = 0.0
         
+        # 分析块的来源类型，用于确定推理水平
+        chunk_sources = []
+        for doc in relevant_chunks:
+            content = doc.page_content.lower()
+            # 改进关键词匹配，优先识别研究内容
+            has_research_keywords = any(keyword in content for keyword in [
+                'abstract', 'introduction', 'method', 'methods', 'result', 'results', 
+                'conclusion', 'conclusions', 'experiment', 'experimental', 'theory',
+                'analysis', 'discussion', 'figure', 'fig.', 'table', 'algorithm'
+            ])
+            has_bio_keywords = any(keyword in content for keyword in [
+                'author', 'biography', 'bio:', 'acknowledgment', 'acknowledgements',
+                'affiliation', 'department', 'corresponding author', 'email:', 'funding'
+            ])
+            has_reference_keywords = any(keyword in content for keyword in [
+                'et al.', 'phys. rev.', 'nature', 'science', 'arxiv:', 'doi:', 'vol.', 'pp.'
+            ])
+            
+            if has_research_keywords:
+                chunk_sources.append("research_content")
+            elif has_bio_keywords:
+                chunk_sources.append("author_bio")
+            elif has_reference_keywords:
+                chunk_sources.append("references")
+            else:
+                chunk_sources.append("other")
+        
+        # 确定推理水平 - 改进逻辑
+        research_count = chunk_sources.count("research_content")
+        bio_count = chunk_sources.count("author_bio")
+        ref_count = chunk_sources.count("references")
+        
+        if research_count > 0:
+            inference_level = "direct_evidence"
+        elif bio_count > 0 and research_count == 0:
+            inference_level = "inferred_from_bio"
+        elif ref_count > 0 and research_count == 0 and bio_count == 0:
+            inference_level = "inferred_from_references"
+        else:
+            inference_level = "weak_inference"
+        
         # 准备上下文
         context = "\n\n---\n\n".join([doc.page_content for doc in relevant_chunks[:3]])
         
-        # 创建分析 prompt
+        # 构建去重的chunks_used列表
+        seen_contents = set()
+        unique_chunks_used = []
+        for i, doc in enumerate(relevant_chunks[:3]):
+            content = doc.page_content
+            if content not in seen_contents:
+                seen_contents.add(content)
+                score = next((score for d, score in results_with_scores if d.page_content == content), None)
+                unique_chunks_used.append({
+                    "preview": content[:200] + "..." if len(content) > 200 else content,
+                    "similarity_score": score,
+                    "source_type": chunk_sources[i] if i < len(chunk_sources) else "unknown"
+                })
+        
+        # 限制为最多3个唯一块
+        unique_chunks_used = unique_chunks_used[:3]
         analysis_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are an expert academic reviewer specializing in analyzing research papers and professor profiles. 
 Your task is to analyze how well a research paper contributes to understanding a professor's research interests and the broader field.
@@ -368,12 +525,15 @@ Your task is to analyze how well a research paper contributes to understanding a
 Provide a comprehensive but accessible analysis that is scientifically rigorous yet easy to understand. 
 Focus on key insights, practical implications, and educational value.
 
+If the content appears to be from author biography rather than research content, you may still make reasonable inferences about potential research directions, but clearly indicate this uncertainty.
+
 Provide a JSON response with the following structure:
 {{
   "score": <float 0-1, how relevant this paper is to the question>,
   "confidence": <float 0-1, your confidence in this assessment>,
   "evidence": "<key evidence from the paper, explained clearly>",
-  "reasoning": "<comprehensive explanation that is simple but scientifically accurate>"
+  "reasoning": "<comprehensive explanation that is simple but scientifically accurate>",
+  "inference_level": "<direct_evidence|inferred_from_bio|weak_inference>"
 }}"""),
             ("user", """Question: {question}
 
@@ -383,7 +543,9 @@ Relevant paper content:
 Based on the above content, evaluate how well this paper helps answer the question. 
 Consider the similarity score from vector search: {similarity_score:.3f}
 
-Provide your analysis in JSON format. Make your explanation comprehensive yet accessible, scientifically rigorous but not overly technical.""")
+Content source analysis: {inference_level_desc}
+
+Provide your analysis in JSON format. Make your explanation comprehensive yet accessible, scientifically rigorous but not overly technical. If using biographical information, clearly note the inferential nature of your analysis.""")
         ])
         
         # 创建 JSON 解析器
@@ -392,12 +554,21 @@ Provide your analysis in JSON format. Make your explanation comprehensive yet ac
         # 创建链
         chain = analysis_prompt | self.llm | json_parser
         
+        # 准备推理水平描述
+        inference_descriptions = {
+            "direct_evidence": "Content appears to be from research sections (abstract, methods, results, etc.)",
+            "inferred_from_bio": "Content appears to be from author biography - analysis is inferential",
+            "weak_inference": "Content source unclear - analysis has higher uncertainty"
+        }
+        inference_level_desc = inference_descriptions.get(inference_level, "Content source analysis unavailable")
+        
         # 执行分析
         try:
             analysis = chain.invoke({
                 "question": question,
                 "context": context,
-                "similarity_score": similarity_score
+                "similarity_score": similarity_score,
+                "inference_level_desc": inference_level_desc
             })
             
             # 确保包含所有必需字段
@@ -406,9 +577,11 @@ Provide your analysis in JSON format. Make your explanation comprehensive yet ac
                 "confidence": float(analysis.get("confidence", 0)),
                 "evidence": analysis.get("evidence", ""),
                 "reasoning": analysis.get("reasoning", ""),
+                "inference_level": analysis.get("inference_level", inference_level),
                 "similarity_score": similarity_score,
                 "question_weight": question_weight,
-                "chunks_analyzed": len(relevant_chunks)
+                "chunks_analyzed": len(relevant_chunks),
+                "chunks_used": unique_chunks_used
             }
             
         except Exception as e:
@@ -419,12 +592,14 @@ Provide your analysis in JSON format. Make your explanation comprehensive yet ac
                 "confidence": 0.5,
                 "evidence": context[:200] + "..." if context else "",
                 "reasoning": f"Analysis based on similarity score only due to error: {str(e)}",
+                "inference_level": inference_level,
                 "similarity_score": similarity_score,
                 "question_weight": question_weight,
-                "chunks_analyzed": len(relevant_chunks)
+                "chunks_analyzed": len(relevant_chunks),
+                "chunks_used": unique_chunks_used
             }
         
-        print(f"✓ Relevance score: {result['score']:.3f}, Confidence: {result['confidence']:.3f}")
+        print(f"✓ Relevance score: {result['score']:.3f}, Confidence: {result['confidence']:.3f}, Inference: {result['inference_level']}")
         return result
     
     def analyze_all_questions_for_paper(self, paper_id: str) -> Dict[str, Dict[str, Any]]:
