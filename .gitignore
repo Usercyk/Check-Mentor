@@ -65,6 +65,7 @@ cache/
 reports/
 Downloads_pdf/
 Downloads_md/
+data/
 
 # Temporary files
 tmp/
