@@ -1,68 +1,134 @@
-""""""
+"""""""""
 
-配置管理模块配置模块
+配置管理模块
 
-加载环境变量和系统配置从 .env 文件加载环境变量
+从 .env 文件加载环境变量配置管理模块配置模块
 
-""""""
+"""
 
-import osimport os
+import os加载环境变量和系统配置从 .env 文件加载环境变量
 
-from pathlib import Pathfrom dotenv import load_dotenv
+from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv""""""
 
-# 加载 .env 文件
 
-# 加载 .env 文件load_dotenv()
+
+# 加载 .env 文件import osimport os
 
 load_dotenv()
 
-# --- LLM Provider ---
+from pathlib import Pathfrom dotenv import load_dotenv
 
-# API 配置# 使用 'openai' 或 'gemini'
+# 项目信息
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
+PROJECT_NAME = "学术开盒 - Check-Mentor"from dotenv import load_dotenv
+
+PROJECT_VERSION = "1.0"
+
+# 加载 .env 文件
+
+# API 配置
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")# 加载 .env 文件load_dotenv()
 
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
 
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4")# --- OpenAI/School Platform API ---
+load_dotenv()
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# LLM 配置
 
-OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")# --- LLM Provider ---
 
-# Embedding 配置LLM_MODEL = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4")
+
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))# API 配置# 使用 'openai' 或 'gemini'
+
+
+
+# Embedding 配置OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", OPENAI_API_KEY)# --- Google Gemini API ---
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", OPENAI_API_KEY)OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
 
-EMBEDDING_API_BASE = os.getenv("EMBEDDING_API_BASE", OPENAI_API_BASE)GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+EMBEDDING_API_BASE = os.getenv("EMBEDDING_API_BASE", OPENAI_API_BASE)
+
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4")# --- OpenAI/School Platform API ---
+
+# Gemini 配置（备用）
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 
 
-# Gemini 配置# --- Tavily Search API ---
+# 向量数据库配置OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+CHROMA_PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
+
+CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "papers")# Embedding 配置LLM_MODEL = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
+
+
+
+# 文本分割配置EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
+
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", OPENAI_API_KEY)# --- Google Gemini API ---
+
+
+
+# 路径配置EMBEDDING_API_BASE = os.getenv("EMBEDDING_API_BASE", OPENAI_API_BASE)GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+BASE_DIR = Path(__file__).parent
+
+DATA_DIR = BASE_DIR / "data"
+
+OUTPUT_DIR = BASE_DIR / "output"
+
+CACHE_DIR = BASE_DIR / "cache"# Gemini 配置# --- Tavily Search API ---
+
+
+
+# 创建必要的目录GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
+
+CACHE_DIR.mkdir(exist_ok=True, parents=True)
 
 
 
 # 向量数据库配置# --- gpt-researcher Configuration ---
 
-CHROMA_PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")# 可选值: "tavily", "duckduckgo", "google", "bing", "arxiv", "serper", "semantic_scholar", "pubmed", "exa"
+def validate_config():
 
-CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "papers")SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "duckduckgo")
+    """验证配置是否完整"""CHROMA_PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")# 可选值: "tavily", "duckduckgo", "google", "bing", "arxiv", "serper", "semantic_scholar", "pubmed", "exa"
 
+    required_vars = {
 
+        "OPENAI_API_KEY": OPENAI_API_KEY,CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "papers")SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "duckduckgo")
 
-# 项目配置# 报告类型: "research_report", "resource_report", "outline_report", "custom_report", "subtopic_report"
+    }
 
-PROJECT_NAME = os.getenv("PROJECT_NAME", "学术开盒")REPORT_TYPE = "research_report"
+    
 
-PROJECT_VERSION = "1.0"
+    missing_vars = [var for var, value in required_vars.items() if not value]
 
-MAX_PAPERS = int(os.getenv("MAX_PAPERS", "100"))# --- 检查关键配置 ---
+    # 项目配置# 报告类型: "research_report", "resource_report", "outline_report", "custom_report", "subtopic_report"
+
+    if missing_vars:
+
+        raise ValueError(PROJECT_NAME = os.getenv("PROJECT_NAME", "学术开盒")REPORT_TYPE = "research_report"
+
+            f"Missing required environment variables: {', '.join(missing_vars)}\n"
+
+            f"Please check your .env file."PROJECT_VERSION = "1.0"
+
+        )
+
+    MAX_PAPERS = int(os.getenv("MAX_PAPERS", "100"))# --- 检查关键配置 ---
+
+    print("✓ Configuration validated successfully")
 
 def check_config():
 
