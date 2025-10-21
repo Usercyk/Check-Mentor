@@ -152,15 +152,38 @@ class PaperRAGProcessor:
         print(f"🔢 Creating vector embeddings and storing in Chroma...")
         print(f"   Persist directory: {self.persist_directory}")
         
+        # 清理文档内容：移除空文本和特殊字符
+        cleaned_chunks = []
+        for chunk in chunks:
+            # 确保 page_content 是字符串且不为空
+            if hasattr(chunk, 'page_content') and isinstance(chunk.page_content, str):
+                content = chunk.page_content.strip()
+                if content and len(content) > 0:
+                    # 移除可能导致问题的字符
+                    content = content.replace('\x00', '')  # 移除空字符
+                    if content:
+                        # 创建新的 Document 对象with cleaned content
+                        from langchain_core.documents import Document
+                        cleaned_chunk = Document(
+                            page_content=content,
+                            metadata=chunk.metadata if hasattr(chunk, 'metadata') else {}
+                        )
+                        cleaned_chunks.append(cleaned_chunk)
+        
+        print(f"   Cleaned: {len(cleaned_chunks)}/{len(chunks)} valid chunks")
+        
+        if not cleaned_chunks:
+            raise ValueError("No valid chunks after cleaning!")
+        
         # 创建或加载向量数据库
         self.vectorstore = Chroma.from_documents(
-            documents=chunks,
+            documents=cleaned_chunks,
             embedding=self.embeddings,
             collection_name=config.CHROMA_COLLECTION_NAME,
             persist_directory=self.persist_directory
         )
         
-        print(f"✓ Vector store created with {len(chunks)} embeddings")
+        print(f"✓ Vector store created with {len(cleaned_chunks)} embeddings")
         return self.vectorstore
     
     def load_vectorstore(self) -> Chroma:
