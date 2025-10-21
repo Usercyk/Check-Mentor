@@ -1,0 +1,28 @@
+# LangChain 核心依赖 (2025 版本)
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-openai>=0.2.0
+langchain-chroma>=0.1.0
+langchain-text-splitters>=0.3.0
+
+# 向量数据库
+chromadb>=0.5.0
+
+# OpenAI API
+openai>=1.0.0
+
+# PDF 处理
+pypdf>=4.0.0
+
+# Markdown 处理
+unstructured>=0.10.0
+markdown>=3.5.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# 其他实用工具
+requests>=2.31.0
+beautifulsoup4>=4.12.0  # 如果需要网页爬取
+tqdm>=4.66.0  # 进度条
