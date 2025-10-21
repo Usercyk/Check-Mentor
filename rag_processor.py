@@ -42,8 +42,16 @@ class PaperRAGProcessor:
                 self.client = OpenAI(api_key=api_key, base_url=base_url)
             
             def embed_documents(self, texts):
-                response = self.client.embeddings.create(input=texts, model=self.model)
-                return [data.embedding for data in response.data]
+                # 分批处理以避免请求体过大，API限制批次大小不超过10
+                batch_size = 10  # 每批最多10个文本
+                all_embeddings = []
+                
+                for i in range(0, len(texts), batch_size):
+                    batch_texts = texts[i:i + batch_size]
+                    response = self.client.embeddings.create(input=batch_texts, model=self.model)
+                    all_embeddings.extend([data.embedding for data in response.data])
+                
+                return all_embeddings
             
             def embed_query(self, text):
                 response = self.client.embeddings.create(input=[text], model=self.model)
