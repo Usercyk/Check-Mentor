@@ -127,6 +127,7 @@ def main():
     print(f"2. Ready to start RAG processing")
     print(f"\nThis will:")
     print(f"   - Load and chunk all {len(papers_info)} papers")
+def main(run_full: bool = False):
     print(f"   - Create vector embeddings (using OpenAI API)")
     print(f"   - Generate summaries for each paper")
     print(f"   - Analyze relevance across 5 dimensions")
@@ -189,11 +190,10 @@ def main():
     print(f"💾 Saving results")
     print(f"{'='*70}\n")
     
-    # 保存总结
-    for paper_id, summary in all_results["summaries"].items():
-        data_manager.add_paper_summary(paper_id, summary)
-    
-    # 保存分析结果
+    # 交互式提示已移除；通过参数 run_full=True 来触发完整处理流程。
+    if not run_full:
+        print(f"\n\u2713 Setup complete. To start full analysis, call main(run_full=True) or run the script with the appropriate flag.")
+        return
     for paper_id, analysis in all_results["analysis_results"].items():
         data_manager.add_analysis_result(paper_id, analysis)
     

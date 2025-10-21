@@ -2,7 +2,6 @@
 RAG 处理器
 实现任务 1-5：论文加载、分割、向量化、存储和相关性分析
 """
-import json
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -32,10 +31,28 @@ class PaperRAGProcessor:
         self.persist_directory = persist_directory or config.CHROMA_PERSIST_DIRECTORY
         
         # 初始化 Embeddings
-        self.embeddings = OpenAIEmbeddings(
-            model=config.EMBEDDING_MODEL,
-            openai_api_key=config.EMBEDDING_API_KEY,
-            openai_api_base=config.EMBEDDING_API_BASE
+        # 使用自定义embeddings类，因为学校的API与langchain不兼容
+        from langchain_core.embeddings import Embeddings
+        class CustomEmbeddings(Embeddings):
+            def __init__(self, api_key, base_url, model):
+                self.api_key = api_key
+                self.base_url = base_url
+                self.model = model
+                from openai import OpenAI
+                self.client = OpenAI(api_key=api_key, base_url=base_url)
+            
+            def embed_documents(self, texts):
+                response = self.client.embeddings.create(input=texts, model=self.model)
+                return [data.embedding for data in response.data]
+            
+            def embed_query(self, text):
+                response = self.client.embeddings.create(input=[text], model=self.model)
+                return response.data[0].embedding
+        
+        self.embeddings = CustomEmbeddings(
+            api_key=config.EMBEDDING_API_KEY,
+            base_url=config.EMBEDDING_API_BASE,
+            model=config.EMBEDDING_MODEL
         )
         
         # 初始化 LLM
@@ -162,13 +179,25 @@ class PaperRAGProcessor:
                     # 移除可能导致问题的字符
                     content = content.replace('\x00', '')  # 移除空字符
                     if content:
+                        # 手动过滤复杂的metadata
+                        metadata = chunk.metadata if hasattr(chunk, 'metadata') else {}
+                        filtered_metadata = {}
+                        for key, value in metadata.items():
+                            if isinstance(value, (str, int, float, bool)) or value is None:
+                                filtered_metadata[key] = value
+                            # 跳过列表和其他复杂类型
+                        
                         # 创建新的 Document 对象with cleaned content
                         from langchain_core.documents import Document
                         cleaned_chunk = Document(
                             page_content=content,
-                            metadata=chunk.metadata if hasattr(chunk, 'metadata') else {}
+                            metadata=filtered_metadata
                         )
                         cleaned_chunks.append(cleaned_chunk)
+                else:
+                    print(f"⚠️  Skipping chunk with empty content")
+            else:
+                print(f"⚠️  Skipping chunk with invalid page_content: type={type(chunk.page_content)}")
         
         print(f"   Cleaned: {len(cleaned_chunks)}/{len(chunks)} valid chunks")
         
@@ -299,7 +328,7 @@ Provide a structured summary in 200-300 words.""")
         retriever = self.vectorstore.as_retriever(
             search_kwargs={
                 "k": top_k,
-                "filter": {"paper_id": paper_id}
+                "filter": {"id": paper_id}
             }
         )
         
@@ -309,7 +338,7 @@ Provide a structured summary in 200-300 words.""")
         results_with_scores = self.vectorstore.similarity_search_with_score(
             query=question,
             k=top_k,
-            filter={"paper_id": paper_id}
+            filter={"id": paper_id}
         )
         
         # 计算平均相似度分数（Chroma 返回的是距离，越小越相似）
@@ -325,23 +354,28 @@ Provide a structured summary in 200-300 words.""")
         
         # 创建分析 prompt
         analysis_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert academic reviewer. Analyze the relevance of research paper content to specific questions.
+            ("system", """You are an expert academic reviewer specializing in analyzing research papers and professor profiles. 
+Your task is to analyze how well a research paper contributes to understanding a professor's research interests and the broader field.
+
+Provide a comprehensive but accessible analysis that is scientifically rigorous yet easy to understand. 
+Focus on key insights, practical implications, and educational value.
+
 Provide a JSON response with the following structure:
 {{
-  "score": <float 0-1>,
-  "confidence": <float 0-1>,
-  "evidence": "<key evidence from the paper>",
-  "reasoning": "<explanation of the relevance>"
+  "score": <float 0-1, how relevant this paper is to the question>,
+  "confidence": <float 0-1, your confidence in this assessment>,
+  "evidence": "<key evidence from the paper, explained clearly>",
+  "reasoning": "<comprehensive explanation that is simple but scientifically accurate>"
 }}"""),
             ("user", """Question: {question}
 
 Relevant paper content:
 {context}
 
-Based on the above content, evaluate how well this paper addresses the question. 
+Based on the above content, evaluate how well this paper helps answer the question. 
 Consider the similarity score from vector search: {similarity_score:.3f}
 
-Provide your analysis in JSON format.""")
+Provide your analysis in JSON format. Make your explanation comprehensive yet accessible, scientifically rigorous but not overly technical.""")
         ])
         
         # 创建 JSON 解析器
@@ -483,7 +517,4 @@ Provide your analysis in JSON format.""")
         }
 
 
-if __name__ == "__main__":
-    # 测试代码
-    processor = PaperRAGProcessor()
-    print("RAG Processor initialized successfully!")
+# 模块提供 PaperRAGProcessor 类；尾部测试代码已移除以避免导入时副作用

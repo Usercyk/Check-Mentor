@@ -3,7 +3,6 @@
 处理论文数据的存储和检索
 """
 import json
-from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
@@ -213,26 +212,4 @@ class DataManager:
         return summary_text
 
 
-if __name__ == "__main__":
-    # 测试代码
-    dm = DataManager("test_data.json")
-    
-    # 设置教授信息
-    dm.set_professor_info(
-        name="Test Professor",
-        department="Physics",
-        university="Test University"
-    )
-    
-    # 添加测试论文
-    dm.add_paper({
-        "id": "paper_001",
-        "title": "Test Paper",
-        "authors": ["Author A", "Author B"],
-        "year": 2024
-    })
-    
-    # 保存
-    dm.save()
-    
-    print("✓ Data manager test completed")
+# 模块提供 DataManager 类；测试代码已移除以避免导入时副作用

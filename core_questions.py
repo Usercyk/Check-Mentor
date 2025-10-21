@@ -4,34 +4,22 @@
 """
 
 CORE_QUESTIONS = {
-    "research_domain": {
-        "question": "What is the main research domain and field of this paper? Does it align with the professor's research interests?",
-        "question_zh": "这篇论文的主要研究领域是什么？是否与教授的研究兴趣相符？",
-        "weight": 0.3
+    "professor_interests": {
+        "question": "What research directions is the professor interested in, and what contributions has he made to these areas?",
+        "question_zh": "老师对哪些方向感兴趣，他对此有哪些贡献？",
+        "weight": 0.4
     },
     
-    "technical_approach": {
-        "question": "What technical methods and approaches are used in this paper? Are they commonly used in the professor's lab?",
-        "question_zh": "这篇论文使用了什么技术方法和途径？这些方法是否在教授的实验室中常用？",
+    "field_problems": {
+        "question": "What problems are scholars in these research directions concerned about—what are the main problems within these directions?",
+        "question_zh": "这些方向的学者们都在关心什么问题——这些方向内的主要问题是什么？",
+        "weight": 0.35
+    },
+    
+    "undergraduate_projects": {
+        "question": "What projects in these research directions can undergraduate students participate in?",
+        "question_zh": "这些方向有哪些本科生可以参与的项目？",
         "weight": 0.25
-    },
-    
-    "novelty": {
-        "question": "What is the novelty and innovation of this paper? Does it introduce new concepts or methods?",
-        "question_zh": "这篇论文的新颖性和创新点是什么？是否引入了新概念或新方法？",
-        "weight": 0.2
-    },
-    
-    "beginner_friendly": {
-        "question": "Is this paper suitable for undergraduate students to learn and reproduce? Does it provide accessible entry points?",
-        "question_zh": "这篇论文是否适合本科生学习和复现？是否提供了易于入门的切入点？",
-        "weight": 0.15
-    },
-    
-    "practical_value": {
-        "question": "What is the practical application value of this paper? Can it be applied to real-world problems?",
-        "question_zh": "这篇论文的实际应用价值是什么？能否应用于实际问题？",
-        "weight": 0.1
     }
 }
 

@@ -2,7 +2,6 @@
 主程序示例
 展示如何使用 RAG 处理器完成任务 1-5
 """
-from pathlib import Path
 from datetime import datetime
 from rag_processor import PaperRAGProcessor
 from data_manager import DataManager
@@ -30,18 +29,11 @@ def main():
     # 实际使用时，这些信息应该从爬虫或其他数据源获取
     papers_info = [
         {
-            "id": "paper_001",
-            "title": "Quantum Computing Advances",
-            "authors": ["Alice Smith", "Bob Johnson"],
+            "id": "example_paper",
+            "title": "Quantum Computing Applications in Machine Learning",
+            "authors": ["Alice Smith", "Bob Johnson", "Charlie Brown"],
             "year": 2024,
-            "pdf_filename": "paper_001.pdf"
-        },
-        {
-            "id": "paper_002", 
-            "title": "Condensed Matter Physics Study",
-            "authors": ["Charlie Brown"],
-            "year": 2023,
-            "pdf_filename": "paper_002.pdf"
+            "md_filename": "example_paper.md"
         }
         # 添加更多论文...
     ]
@@ -100,20 +92,12 @@ def main():
     # 保存到文件
     data_manager.save()
     
-    # 导出摘要
-    summary_text = data_manager.export_analysis_summary("analysis_summary.md")
-    print(f"\n" + "="*70)
-    print(f"📊 Analysis Summary:")
-    print(f"="*70)
-    print(summary_text[:500] + "..." if len(summary_text) > 500 else summary_text)
-    
     print(f"\n{'='*70}")
     print(f"✅ Processing complete!")
     print(f"{'='*70}")
     print(f"\nResults saved to:")
     print(f"  - Data file: {data_manager.data_file}")
     print(f"  - Vector store: {processor.persist_directory}")
-    print(f"  - Summary: {config.OUTPUT_DIR / 'analysis_summary.md'}")
 
 
 if __name__ == "__main__":
