@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_community.chat_models import ChatTongyi
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from . import config
 from .final_analysis import FinalAnalyzer
@@ -93,14 +94,48 @@ class WorkflowOrchestrator:
         else:
             print("  -> INFO: Fallback LLM not configured. The program will run with the main LLM only.")
 
+        # Initialize Gemini LLM for synthesis
+        gemini_llm = None
+        if config.GEMINI_API_KEY:
+            try:
+                # Check if a custom API Base is provided
+                if config.GEMINI_API_BASE:
+                    print(f"  -> Initializing Gemini via Custom Gateway")
+                    # Note: The error "Unknown name 'messages'" indicates the gateway expects Google-native JSON format,
+                    # even if it's an 'OpenAI-compatible' gateway URL. It likely proxies directly to Google.
+                    # Therefore, we use ChatGoogleGenerativeAI (which sends Google format) but point it to the custom endpoint.
+                    gemini_llm = ChatGoogleGenerativeAI(
+                        model=config.GEMINI_MODEL,
+                        google_api_key=config.GEMINI_API_KEY,
+                        temperature=config.LLM_TEMPERATURE,
+                        transport="rest",
+                        client_options={"api_endpoint": config.GEMINI_API_BASE},
+                        timeout=30
+                    )
+                else:
+                    # Use native Google API
+                    gemini_llm = ChatGoogleGenerativeAI(
+                        model=config.GEMINI_MODEL,
+                        google_api_key=config.GEMINI_API_KEY,
+                        temperature=config.LLM_TEMPERATURE,
+                        transport="rest",
+                        timeout=30
+                    )
+                print("  -> Gemini LLM initialized successfully.")
+            except Exception as e:
+                print(f"  ⚠️ Could not initialize Gemini LLM. Reason: {e}")
+                gemini_llm = None
+        else:
+            print("  -> INFO: Gemini LLM not configured.")
+
         # 2. 将LLM实例注入到各个工作流中
-        self.contribution_workflow = ContributionWorkflow(main_llm, fallback_llm)
-        self.field_problems_workflow = FieldProblemsWorkflow(main_llm, fallback_llm)
+        self.contribution_workflow = ContributionWorkflow(main_llm, fallback_llm, gemini_llm)
+        self.field_problems_workflow = FieldProblemsWorkflow(main_llm, fallback_llm, gemini_llm)
         # 传递测试模式标志，以便在测试模式下进行更稳健的回退处理
-        self.undergrad_projects_workflow = UndergradProjectsWorkflow(main_llm, fallback_llm, test_mode=self.test_mode)
+        self.undergrad_projects_workflow = UndergradProjectsWorkflow(main_llm, fallback_llm, gemini_llm, test_mode=self.test_mode)
         
         # 3. 初始化最终分析器，并注入LLM用于翻译
-        self.final_analyzer = FinalAnalyzer(self.professor_name, main_llm)
+        self.final_analyzer = FinalAnalyzer(self.professor_name, main_llm, gemini_llm)
         
         # 4. 初始化元数据管理器
         self.metadata_manager = MetadataManager()
