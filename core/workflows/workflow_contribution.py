@@ -28,13 +28,14 @@ class ContributionWorkflow:
     """
     分析教授核心贡献的工作流。
     """
-    def __init__(self, main_llm, fallback_llm=None):
+    def __init__(self, main_llm, fallback_llm=None, gemini_llm=None):
         """
         初始化工作流，接收外部传入的LLM实例。
         """
         print("  -> ContributionWorkflow initialized.")
         self.llm = main_llm
         self.fallback_llm = fallback_llm
+        self.gemini_llm = gemini_llm
         self.cache = None
 
     def _load_paper_content(self, file_path: str) -> str:
@@ -275,37 +276,30 @@ Example Output:
         analysis_text = "\n\n".join(analysis_parts)
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a senior science writer and mentor, tasked with writing a summary of a professor's research for a bright, motivated undergraduate student. The student is exploring research opportunities and needs to understand the professor's work: what it is, why it's important, and what its impact has been.
+            ("system", """You are a pragmatic and knowledgeable academic mentor, tasked with writing a summary of a professor's research for a bright, motivated undergraduate student.
 
-**Your Goal:** Transform a list of individual paper analyses into a compelling, clear, and honest narrative. Avoid overly simplistic analogies, but strive for clarity.
+**Your Goal:** Transform a list of individual paper analyses into a coherent, educational, and grounded narrative.
+**Your Audience:** A smart undergraduate who is familiar with basic concepts but needs a clear guide to this specific field.
 
-**Your Audience:** A smart undergraduate who is familiar with basic physics/engineering concepts but is not an expert in this specific sub-field.
+**CRITICAL STYLE GUIDELINES:**
+1.  **Natural Flow:** Do NOT write a disjointed list of facts. Use transition words (e.g., "Furthermore," "Specifically," "Building on this") to connect ideas smoothly. The text should read like a thoughtful email from a mentor, not a robot-generated report.
+2.  **NO HYPE / NO FLUFF:** Strictly avoid exaggerated adjectives like "revolutionary," "unprecedented," or "miraculous." Do not sound like a marketing brochure. Be objective. Instead of saying "He made a groundbreaking discovery," say "He demonstrated [X] for the first time" or "He proposed a method to solve [Y]."
+3.  **Clarity over Jargon:** Explain *why* something is done before saying *what* was done.
 
-**IMPORTANT - Temporal Weighting**: The papers are listed with recency weights. Papers marked as "HIGH" or "MEDIUM-HIGH" recency represent more recent work and should be given MORE ATTENTION in your synthesis, as they reflect the professor's current research directions and the field's cutting-edge. Older papers (marked as "LOW" recency) provide historical context but should not dominate the narrative unless they are clearly foundational breakthroughs.
+**IMPORTANT - Temporal Weighting**: The papers are listed with recency weights. Focus the narrative on "HIGH" or "MEDIUM-HIGH" recency papers to reflect current interests. Use older papers only for context.
 
 **Key Instructions:**
 
-1.  **Structure and Tone:**
-    *   **Role-play:** Write as a knowledgeable and encouraging mentor. Your tone should be professional yet accessible and engaging.
-    *   **Narrative, not a List:** Do not just list the findings. Weave them into a coherent story about the professor's research journey and goals.
-    *   **Word Count:** Aim for a comprehensive summary of around 400 words. You have enough space to be thorough.
+1.  **Content - Section 1: Research Directions (What they do):**
+    *   Identify 3-5 primary research themes.
+    *   For each theme, write a fluid paragraph. Start with the *problem* or *goal*, then describe the *approach*.
+    *   **"Prudent Explanation":** If you use a specialized term (e.g., "topological photonics"), briefly explain it in simple terms within parentheses, but only if you are sure. If unsure, use the term as is.
 
-2.  **Content - Section 1: Research Directions (What they do):**
-    *   Identify 3-5 primary, distinct research themes from the provided list.
-    *   **Prioritize recent work**: Focus more on themes evident in papers with HIGH recency weight.
-    *   For each theme, write a short, clear paragraph. Start with the key concept, then briefly explain its goal.
-    *   **"Prudent Explanation" Rule:**
-        *   Identify key technical terms (e.g., "topological photonics," "quantum entanglement").
-        *   If you are highly confident in your knowledge, provide a concise, parenthetical explanation `(like this)`.
-        *   **Crucially:** If you encounter a highly specialized term and are NOT confident in explaining it, **DO NOT GUESS**. Simply use the term as is. This signals to the student that it's a specific concept to look up. Honesty is better than being wrong.
-
-3.  **Content - Section 2: Contribution Summary (Why it matters & its Impact):**
-    *   Synthesize the individual contributions into a big-picture overview.
-    *   **Emphasize recent contributions**: The summary should reflect the professor's current focus and recent achievements.
-    *   Explain the **"Why"**: What is the grand challenge or fundamental question this professor's work is trying to address? (e.g., "making quantum computers scalable," "pushing the limits of optical communication").
-    *   Explain the **"Impact"**: How has their work advanced the field? Mention breakthroughs, pioneering work, or how they connect different ideas.
-    *   Explain the **"Impact"**: How has their work advanced the field? Mention breakthroughs, pioneering work, or how they connect different ideas.
-    *   Conclude with a powerful summary sentence that captures the essence of their research's significance.
+2.  **Content - Section 2: Contribution Summary (The Big Picture):**
+    *   Synthesize the individual contributions into a single, flowing narrative (approx. 300-400 words).
+    *   **Focus on Concrete Achievements:** What specific problem did they solve? What new capability did they unlock?
+    *   **Connect the Dots:** How do these different papers fit together? Is there a central philosophy or methodology?
+    *   **Impact:** Describe the impact in terms of scientific progress (e.g., "This work allows for more stable quantum bits"), not just prestige.
 
 **Output Format:**
 You MUST provide a JSON response with a `research_directions` key (a list of strings) and a `contribution_summary` key (a single string).
@@ -316,18 +310,40 @@ You MUST provide a JSON response with a `research_directions` key (a list of str
     "<Paragraph for Direction 2>",
     ...
   ],
-  "contribution_summary": "<The overall summary paragraph, approximately 400 words.>"
+  "contribution_summary": "<The overall summary paragraph. Fluid, objective, and educational.>"
 }}"""),
             ("user", "Based on the following analyses of the professor's papers, please generate the structured summary:\n\n---\n{analysis_text}\n---")
         ])
 
         # 分离LLM调用和解析
-        llm_chain = prompt | self.llm
         parser = JsonOutputParser()
 
+        # 尝试使用 Gemini (如果配置了)
+        raw_output_obj = None
+        if self.gemini_llm:
+            try:
+                print("    -> Attempting synthesis with Gemini...")
+                llm_chain = prompt | self.gemini_llm
+                raw_output_obj = llm_chain.invoke({"analysis_text": analysis_text})
+            except Exception as e:
+                print(f"    ⚠️ Gemini synthesis failed (Timeout or Error): {e}")
+                print("    -> Falling back to Main LLM (OpenAI)...")
+                raw_output_obj = None # Reset to trigger fallback
+
+        # 如果 Gemini 没配置或者失败了，使用主 LLM
+        if not raw_output_obj:
+            try:
+                llm_chain = prompt | self.llm
+                raw_output_obj = llm_chain.invoke({"analysis_text": analysis_text})
+            except Exception as e:
+                print(f"    🔴 Critical Error: Main LLM synthesis also failed: {e}")
+                return {
+                    "research_directions": ["Synthesis failed."],
+                    "contribution_summary": f"Both Gemini and Main LLM failed to synthesize results. Error: {e}"
+                }
+
         try:
-            # 步骤1: 调用LLM并获取原始输出
-            raw_output_obj = llm_chain.invoke({"analysis_text": analysis_text})
+            # 步骤1: 获取原始输出 (raw_output_obj 已经获取到了)
             raw_output = raw_output_obj.content if hasattr(raw_output_obj, 'content') else str(raw_output_obj)
 
             # 步骤2: 清理并提取纯净的JSON字符串

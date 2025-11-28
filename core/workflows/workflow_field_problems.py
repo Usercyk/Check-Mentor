@@ -24,13 +24,14 @@ class FieldProblemsWorkflow:
     """
     分析领域热点问题的工作流。
     """
-    def __init__(self, main_llm, fallback_llm=None):
+    def __init__(self, main_llm, fallback_llm=None, gemini_llm=None):
         """
         初始化工作流，接收外部传入的LLM实例。
         """
         print("  -> FieldProblemsWorkflow initialized.")
         self.llm = main_llm
         self.fallback_llm = fallback_llm
+        self.gemini_llm = gemini_llm
         self.cache = None
 
     def _print_section_header(self, title: str, level: int = 1):
@@ -253,19 +254,36 @@ Instructions:
         ])
 
         parser = JsonOutputParser()
-        chain = prompt | self.llm | parser
+        
+        # 尝试使用 Gemini (如果配置了)
+        synthesis_result = None
+        if self.gemini_llm:
+            try:
+                print("    -> Attempting synthesis with Gemini...")
+                chain = prompt | self.gemini_llm | parser
+                synthesis_result = chain.invoke({
+                    "synthesis_context": synthesis_context
+                })
+            except Exception as e:
+                print(f"    ⚠️ Gemini synthesis failed (Timeout or Error): {e}")
+                print("    -> Falling back to Main LLM (OpenAI)...")
+                synthesis_result = None
 
-        try:
-            synthesis_result = chain.invoke({
-                "synthesis_context": synthesis_context
-            })
-            return synthesis_result
-        except Exception as e:
-            print(f"    ⚠️ Error during final synthesis: {e}")
-            return {
-                "summary": "Failed to synthesize final summary due to an error.",
-                "hot_topics": []
-            }
+        # 如果 Gemini 没配置或者失败了，使用主 LLM
+        if not synthesis_result:
+            try:
+                chain = prompt | self.llm | parser
+                synthesis_result = chain.invoke({
+                    "synthesis_context": synthesis_context
+                })
+            except Exception as e:
+                print(f"    🔴 Critical Error: Main LLM synthesis also failed: {e}")
+                return {
+                    "summary": "Synthesis failed.",
+                    "hot_topics": []
+                }
+
+        return synthesis_result
 
     def _cluster_papers_by_llm(self, papers: List[Dict[str, Any]]) -> Dict[str, List[str]]:
         """

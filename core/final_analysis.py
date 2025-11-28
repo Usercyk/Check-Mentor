@@ -8,16 +8,18 @@ class FinalAnalyzer:
     负责将所有工作流的分析结果整合成一份最终的、连贯的报告。
     同时负责将报告翻译为指定语言。
     """
-    def __init__(self, professor_name: str, llm=None):
+    def __init__(self, professor_name: str, llm=None, gemini_llm=None):
         """
         初始化最终分析器。
 
         Args:
             professor_name (str): 教授姓名。
-            llm: 用于翻译的语言模型实例。
+            llm: 用于翻译的语言模型实例 (OpenAI)。
+            gemini_llm: 用于翻译的 Gemini 模型实例 (优先使用)。
         """
         self.professor_name = professor_name
         self.llm = llm
+        self.gemini_llm = gemini_llm
 
     def _get_with_warning(self, data: Dict, key: str, default: Any, source_name: str) -> Any:
         """
@@ -32,7 +34,7 @@ class FinalAnalyzer:
         """
         将报告内容翻译成指定语言。
         """
-        if not self.llm:
+        if not self.llm and not self.gemini_llm:
             print("  -> Translator LLM not provided. Skipping translation.")
             return report_content
 
@@ -45,18 +47,36 @@ class FinalAnalyzer:
             "Report to translate:\n\n---\n{report}\n---"
         )
         
-        chain = prompt | self.llm
+        # 优先尝试 Gemini
+        if self.gemini_llm:
+            try:
+                print("    -> Attempting translation with Gemini...")
+                chain = prompt | self.gemini_llm
+                translated_result = chain.invoke({
+                    "language": target_language,
+                    "report": report_content
+                })
+                print("    -> Gemini translation successful.")
+                return translated_result.content
+            except Exception as e:
+                print(f"    ⚠️ Gemini translation failed: {e}")
+                print("    -> Falling back to Main LLM (OpenAI)...")
+
+        # 回退到主 LLM
+        if self.llm:
+            try:
+                chain = prompt | self.llm
+                translated_result = chain.invoke({
+                    "language": target_language,
+                    "report": report_content
+                })
+                print("  -> Translation successful.")
+                return translated_result.content
+            except Exception as e:
+                print(f"  ⚠️ Error during translation: {e}. Returning original report.")
+                return report_content
         
-        try:
-            translated_result = chain.invoke({
-                "language": target_language,
-                "report": report_content
-            })
-            print("  -> Translation successful.")
-            return translated_result.content
-        except Exception as e:
-            print(f"  ⚠️ Error during translation: {e}. Returning original report.")
-            return report_content
+        return report_content
 
     def generate_final_report(self, results: Dict[str, Any]) -> str:
         """
@@ -114,14 +134,14 @@ class FinalAnalyzer:
         undergrad_projects_summary_str += f"{undergrad_summary}\n\n"
         
         project_ideas = self._get_with_warning(undergrad_projects_analysis, 'project_ideas', [], 'undergrad_projects_analysis')
-        if project_ideas:
-            undergrad_projects_summary_str += "### 具体项目构想:\n"
-            for i, idea in enumerate(project_ideas, 1):
-                undergrad_projects_summary_str += f"**{i}. 项目名称: {idea.get('project_title', 'N/A')}**\n"
-                undergrad_projects_summary_str += f"   - **研究目标**: {idea.get('research_goal', 'N/A')}\n"
-                undergrad_projects_summary_str += f"   - **核心任务**: {idea.get('core_tasks', 'N/A')}\n"
-                undergrad_projects_summary_str += f"   - **预期成果**: {idea.get('expected_outcomes', 'N/A')}\n"
-                undergrad_projects_summary_str += f"   - **参考论文**: {idea.get('reference_paper_title', 'N/A')}\n\n"
+        #if project_ideas:
+            #undergrad_projects_summary_str += "### 具体项目构想:\n"
+            #for i, idea in enumerate(project_ideas, 1):
+            #    undergrad_projects_summary_str += f"**{i}. 项目名称: {idea.get('project_title', 'N/A')}**\n"
+            #    undergrad_projects_summary_str += f"   - **研究目标**: {idea.get('research_goal', 'N/A')}\n"
+            #    undergrad_projects_summary_str += f"   - **核心任务**: {idea.get('core_tasks', 'N/A')}\n"
+            #    undergrad_projects_summary_str += f"   - **预期成果**: {idea.get('expected_outcomes', 'N/A')}\n"
+            #    undergrad_projects_summary_str += f"   - **参考论文**: {idea.get('reference_paper_title', 'N/A')}\n\n"
 
         # 4. 数据来源附录
         appendix = "## 四、分析数据来源\n\n"

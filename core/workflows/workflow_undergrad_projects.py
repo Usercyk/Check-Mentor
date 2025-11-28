@@ -27,13 +27,14 @@ class UndergradProjectsWorkflow:
     """
     分析本科生可参与项目的工作流。
     """
-    def __init__(self, main_llm, fallback_llm=None, test_mode: bool = False):
+    def __init__(self, main_llm, fallback_llm=None, gemini_llm=None, test_mode: bool = False):
         """
         初始化工作流，接收外部传入的LLM实例。
         """
         print("  -> UndergradProjectsWorkflow initialized.")
         self.llm = main_llm
         self.fallback_llm = fallback_llm
+        self.gemini_llm = gemini_llm
         self.cache = None
         # 是否运行在测试模式（由编排器传入）
         self.test_mode = test_mode
@@ -318,12 +319,30 @@ Your summary should:
 
 Synthesized Summary of Project Suggestions:""")
 
-        chain = prompt | self.llm
-
         papers_json_str = json.dumps(papers_for_synthesis, indent=2, ensure_ascii=False)
 
-        synthesis_result = chain.invoke({"papers_json": papers_json_str})
-        return synthesis_result.content
+        # 尝试使用 Gemini (如果配置了)
+        result = None
+        if self.gemini_llm:
+            try:
+                print("    -> Attempting synthesis with Gemini...")
+                chain = prompt | self.gemini_llm
+                result = chain.invoke({"papers_json": papers_json_str})
+            except Exception as e:
+                print(f"    ⚠️ Gemini synthesis failed (Timeout or Error): {e}")
+                print("    -> Falling back to Main LLM (OpenAI)...")
+                result = None
+
+        # 如果 Gemini 没配置或者失败了，使用主 LLM
+        if not result:
+            try:
+                chain = prompt | self.llm
+                result = chain.invoke({"papers_json": papers_json_str})
+            except Exception as e:
+                print(f"    🔴 Critical Error: Main LLM synthesis also failed: {e}")
+                return "Failed to synthesize project suggestions."
+
+        return result.content if hasattr(result, 'content') else str(result)
 
     def run(self, professor_name: str, main_papers: List[Dict[str, Any]], cited_papers: List[Dict[str, Any]], contribution_summary: str) -> Dict[str, Any]:
         """
