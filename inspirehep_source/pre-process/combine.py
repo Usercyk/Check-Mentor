@@ -48,6 +48,35 @@ def parse_manuallist(filepath, data):
                     data[name].add(doi)
     return data
 
+def parse_old_results(filepath, data):
+    if not os.path.exists(filepath):
+        print(f"{filepath} not found.")
+        return data
+
+    current_author = None
+    with open(filepath, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        if line.startswith('='):
+            continue
+        
+        # Heuristic: DOIs usually start with 10.
+        if line.startswith('10.'):
+            if current_author:
+                data[current_author].add(line)
+        else:
+            # Assume it's an author name if it's not a separator and not a DOI
+            # Also skip if it looks like a header or comment
+            if not line.startswith('#'):
+                current_author = line
+            
+    return data
+
 def write_results(filepath, data):
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write("## 论文 DOI 及作者列表 (严格匹配模式)\n\n")
@@ -68,6 +97,7 @@ def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     results_path = os.path.join(base_dir, 'results.txt')
     manuallist_path = os.path.join(base_dir, 'manuallist.txt')
+    old_results_path = os.path.join(base_dir, 'old_result.txt')
     
     # Backup results.txt
     if os.path.exists(results_path):
@@ -76,9 +106,10 @@ def main():
 
     data = parse_results(results_path)
     data = parse_manuallist(manuallist_path, data)
+    data = parse_old_results(old_results_path, data)
     
     write_results(results_path, data)
-    print(f"Merged {manuallist_path} into {results_path}")
+    print(f"Merged {manuallist_path} and {old_results_path} into {results_path}")
 
 if __name__ == "__main__":
     main()

@@ -27,8 +27,9 @@ from datetime import datetime
 
 PROJ_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = PROJ_ROOT / 'config.ini'
-PROGRESS_FILE = PROJ_ROOT / 'inspirehep_source/meta-process/processed.txt'
+PROGRESS_FILE = PROJ_ROOT / 'inspirehep_source/meta-process/processed.json'
 PROGRESS_LOCK = threading.Lock()
+GLOBAL_PROCESSED_CACHE = None
 
 METADATA_LOCK = threading.Lock()
 
@@ -83,22 +84,72 @@ def load_config():
         config.read(CONFIG_PATH, encoding='utf-8')
     return config
 
-def load_progress() -> set[str]:
-    if not PROGRESS_FILE.exists():
-        return set()
-    try:
-        with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
-            return set(line.strip() for line in f if line.strip())
-    except Exception:
-        return set()
+def load_progress() -> Dict[str, set[str]]:
+    global GLOBAL_PROCESSED_CACHE
+    if GLOBAL_PROCESSED_CACHE is not None:
+        return GLOBAL_PROCESSED_CACHE
 
-def save_progress(record: str):
-    with PROGRESS_LOCK:
+    data = defaultdict(set)
+    txt_file = PROJ_ROOT / 'inspirehep_source/meta-process/processed.txt'
+    
+    loaded_list = []
+    is_legacy_list = False
+
+    if txt_file.exists() and not PROGRESS_FILE.exists():
+        print("Migrating processed.txt to processed.json...")
         try:
-            with open(PROGRESS_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"{record}\n")
+            with open(txt_file, 'r', encoding='utf-8') as f:
+                loaded_list = [line.strip() for line in f if line.strip()]
+            txt_file.rename(txt_file.with_suffix('.txt.bak'))
+            is_legacy_list = True
         except Exception as e:
-            print(f"Failed to save progress: {e}")
+            print(f"Migration failed: {e}")
+    elif PROGRESS_FILE.exists():
+        try:
+            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                content = json.load(f)
+                if isinstance(content, list):
+                    loaded_list = content
+                    is_legacy_list = True
+                elif isinstance(content, dict):
+                    for k, v in content.items():
+                        data[k] = set(v)
+        except Exception:
+            pass
+            
+    if is_legacy_list:
+        for item in loaded_list:
+            if '|' in item:
+                t, d = item.split('|', 1)
+                data[t].add(d)
+        # Save immediately in new format
+        try:
+            with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                json_data = {k: list(v) for k, v in data.items()}
+                json.dump(json_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Failed to save migrated progress: {e}")
+            
+    GLOBAL_PROCESSED_CACHE = data
+    return GLOBAL_PROCESSED_CACHE
+
+def save_progress(teacher: str, doi: str):
+    global GLOBAL_PROCESSED_CACHE
+    with PROGRESS_LOCK:
+        if GLOBAL_PROCESSED_CACHE is None:
+            load_progress()
+            
+        if teacher not in GLOBAL_PROCESSED_CACHE:
+            GLOBAL_PROCESSED_CACHE[teacher] = set()
+            
+        if doi not in GLOBAL_PROCESSED_CACHE[teacher]:
+            GLOBAL_PROCESSED_CACHE[teacher].add(doi)
+            try:
+                with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                    json_data = {k: list(v) for k, v in GLOBAL_PROCESSED_CACHE.items()}
+                    json.dump(json_data, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"Failed to save progress: {e}")
 
 def get_sampling_cfg(config) -> Tuple[Optional[int], Optional[int]]:
     try:
@@ -924,12 +975,12 @@ def process_doi_task(args_tuple):
         
         rid = item.get('record_id')
         if not rid: 
-            save_progress(f"{teacher}|{doi}")
+            save_progress(teacher, doi)
             return item
 
         if only_main:
             print(f"  [Skipped] Related papers for {doi} (Only Main requested)")
-            save_progress(f"{teacher}|{doi}")
+            save_progress(teacher, doi)
             return item
 
         # Parallel fetch of IDs
@@ -1050,7 +1101,7 @@ def process_doi_task(args_tuple):
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers_related) as executor:
             list(executor.map(download_related, download_tasks))
             
-        save_progress(f"{teacher}|{doi}")
+        save_progress(teacher, doi)
         return item
 
     except Exception as e:
@@ -1103,7 +1154,7 @@ def main():
         # Prepare tasks
         tasks = []
         for doi in dois:
-            if not args.metadata_only and f"{teacher}|{doi}" in processed_records:
+            if not args.metadata_only and doi in processed_records.get(teacher, set()):
                 print(f"  [Skipped] {doi} (Already processed)")
                 continue
             tasks.append((client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher, args.only_main, args.metadata_only))
