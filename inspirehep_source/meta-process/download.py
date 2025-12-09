@@ -30,6 +30,45 @@ CONFIG_PATH = PROJ_ROOT / 'config.ini'
 PROGRESS_FILE = PROJ_ROOT / 'inspirehep_source/meta-process/processed.txt'
 PROGRESS_LOCK = threading.Lock()
 
+METADATA_LOCK = threading.Lock()
+
+def update_teacher_metadata(teacher_dir: Path, new_item: Dict[str, Any]):
+    metadata_file = teacher_dir / 'metadata_items.json'
+    with METADATA_LOCK:
+        existing_items = []
+        if metadata_file.exists():
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+                    existing_items = existing_data.get("items", [])
+            except Exception as e:
+                print(f"  Warning: Failed to load existing metadata from {metadata_file}: {e}")
+
+        # Deduplicate by DOI (or record_id, or title)
+        merged_map = {}
+        
+        def get_key(itm):
+            return itm.get("doi") or itm.get("record_id") or itm.get("title")
+
+        # Add existing items first
+        for item in existing_items:
+            k = get_key(item)
+            if k:
+                merged_map[k] = item
+        
+        # Add/Update with new item
+        k = get_key(new_item)
+        if k:
+            merged_map[k] = new_item
+
+        final_items = list(merged_map.values())
+
+        try:
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump({"items": final_items}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"  Error saving metadata to {metadata_file}: {e}")
+
 # Import generic downloader
 sys.path.append(str(PROJ_ROOT / 'DOI_source'))
 try:
@@ -248,27 +287,32 @@ class InspireHEPClient:
         response.raise_for_status()
         return response
 
-    def search_literature(self, query: str, size: int = 10, page: int = 1) -> Dict:
+    def search_literature(self, query: str, size: int = 10, page: int = 1, fields: Optional[str] = None) -> Dict:
         url = f"{self.BASE_URL}/literature"
         params = {"q": query, "size": size, "page": page}
+        if fields: params["fields"] = fields
         return self._request(url, params=params).json()
 
     def find_record_by_doi(self, doi: str) -> Optional[Dict]:
         query = f"doi:{doi}"
+        # Reverted to full fetch to ensure 'documents' and 'arxiv_eprints' are present
         results = self.search_literature(query, size=1)
         hits = results.get("hits", {}).get("hits", [])
         return hits[0] if hits else None
     
-    def get_record(self, record_id: str) -> Dict:
+    def get_record(self, record_id: str, fields: Optional[str] = None) -> Dict:
         url = f"{self.BASE_URL}/literature/{record_id}"
-        return self._request(url).json()
+        params = {}
+        if fields: params["fields"] = fields
+        return self._request(url, params=params).json()
 
-    def get_citations(self, record_id: str, size: int = 50, page: int = 1) -> Dict:
+    def get_citations(self, record_id: str, size: int = 50, page: int = 1, fields: Optional[str] = None) -> Dict:
         query = f"refersto:recid:{record_id}"
-        return self.search_literature(query, size=size, page=page)
+        return self.search_literature(query, size=size, page=page, fields=fields)
     
     def get_metadata(self, record_id: str) -> Dict:
-        record = self.get_record(record_id)
+        fields = "metadata.titles,metadata.authors,metadata.abstracts,metadata.preprint_date,metadata.publication_info,metadata.arxiv_eprints,metadata.dois,metadata.citation_count,metadata.keywords,metadata.document_type,metadata.number_of_pages"
+        record = self.get_record(record_id, fields=fields)
         metadata = record.get("metadata", {})
         return {
             "record_id": record_id,
@@ -281,6 +325,8 @@ class InspireHEPClient:
             "citations": metadata.get("citation_count", 0),
             "keywords": [kw.get("value", "") for kw in metadata.get("keywords", [])],
             "inspire_url": f"https://inspirehep.net/literature/{record_id}",
+            "document_type": metadata.get("document_type", []),
+            "number_of_pages": metadata.get("number_of_pages"),
         }
     
     def download_file(self, url: str, output_path: str) -> None:
@@ -337,8 +383,17 @@ def get_author_first_year(client: InspireHEPClient, author_name: str) -> Optiona
     return min_year
 
 def compute_young_author_fields(client: InspireHEPClient, authors: List[str], pub_year: Optional[int], years_window: int) -> Dict[str, Any]:
+    # Disabled young scholar calculation for performance
+    return {"young_scholar_index": -1, "young_authors": [], "author_first_years": {}, "young_author_years_window": years_window}
+
     result = {"young_scholar_index": -1, "young_authors": [], "author_first_years": {}, "young_author_years_window": years_window}
     if not authors or pub_year is None: return result
+    
+    # Optimization: Skip for large collaborations (likely > 30 authors)
+    if len(authors) > 30:
+        # print(f"    [Info] Skipping young author check for {len(authors)} authors (limit 30)")
+        return result
+
     young_any = False
     for name in authors:
         fy = get_author_first_year(client, name)
@@ -375,12 +430,13 @@ def fetch_related_ids(client: InspireHEPClient, record_id: str, kind: str, limit
             return get_citing_dois_openalex(doi, limit)
 
         if kind == "references":
-            record = client.get_record(record_id)
+            record = client.get_record(record_id, fields="metadata.references")
             refs = (record.get('metadata', {}) or {}).get('references', []) or []
+            # print(f"    [Debug] Found {len(refs)} references for {record_id}")
             for ref in refs:
-                # Filter by Journal (PRL/PRD)
-                if not is_prl_or_prd(ref.get('publication_info')):
-                    continue
+                # Filter by Journal (PRL/PRD) - DISABLED
+                #if not is_prl_or_prd(ref.get('publication_info')):
+                #    continue
 
                 rec = ref.get('record') if isinstance(ref, dict) else None
                 if isinstance(rec, dict):
@@ -395,7 +451,7 @@ def fetch_related_ids(client: InspireHEPClient, record_id: str, kind: str, limit
                 if len(ids) >= limit: break
         else:
             # Fetch citations
-            data = client.get_citations(record_id, size=limit)
+            data = client.get_citations(record_id, size=limit, fields="metadata.control_number,metadata.dois")
             hits = (data.get('hits', {}) or {}).get('hits', []) or []
             for h in hits:
                 rid = h.get('id') or (h.get('metadata', {}) or {}).get('control_number')
@@ -440,7 +496,16 @@ def to_items_metadata(record_meta: Dict[str, Any], role: Optional[str] = None) -
     if role: item["role"] = role
     return item
 
-def process_one_by_doi(client: InspireHEPClient, doi: str, out_dir: Path, download: bool = True, years_window: int = 5) -> Dict[str, Any]:
+def should_skip_document(doc_types: List[str]) -> bool:
+    if not doc_types: return False
+    skip_types = {'book', 'conference paper', 'proceedings'}
+    types = {t.lower() for t in doc_types}
+    for t in types:
+        if t in skip_types:
+            return True
+    return False
+
+def process_one_by_doi(client: InspireHEPClient, doi: str, out_dir: Path, download: bool = True, years_window: int = 5, max_pages: Optional[int] = None) -> Dict[str, Any]:
     ensure_dir(out_dir)
     
     base_name = _sanitize_dir_name(doi)
@@ -468,6 +533,20 @@ def process_one_by_doi(client: InspireHEPClient, doi: str, out_dir: Path, downlo
     rid = str(hit.get('id'))
     md_raw = hit.get('metadata', {}) or {}
     meta_norm = client.get_metadata(rid)
+    
+    if should_skip_document(meta_norm.get('document_type', [])):
+        print(f"  [Skipped Download] {doi} is {meta_norm.get('document_type')}")
+        download = False
+
+    if max_pages and meta_norm.get('number_of_pages'):
+        try:
+            pages = int(meta_norm.get('number_of_pages'))
+            if pages > max_pages:
+                print(f"  [Skipped Download] {doi} has {pages} pages (> {max_pages})")
+                download = False
+        except ValueError:
+            pass
+
     item = to_items_metadata(meta_norm)
     
     pdf_filename = f"{_sanitize_dir_name(doi)}.pdf"
@@ -483,6 +562,8 @@ def process_one_by_doi(client: InspireHEPClient, doi: str, out_dir: Path, downlo
                     client.download_file(pdf_url, str(pdf_path))
                 except Exception as e:
                     print(f"警告: 无法下载 PDF ({pdf_url}): {e}")
+            else:
+                print(f"  [Warning] No PDF URL found for {doi} in InspireHEP")
     
     meta_path = out_dir / f"{_sanitize_dir_name(doi)}_metadata.json"
     if pdf_path.exists():
@@ -494,11 +575,25 @@ def process_one_by_doi(client: InspireHEPClient, doi: str, out_dir: Path, downlo
     item.update(ya)
     return item
 
-def process_one_by_record_id_using_url(client: InspireHEPClient, record_id: str, out_dir: Path, download: bool = True, years_window: int = 5) -> Dict[str, Any]:
+def process_one_by_record_id_using_url(client: InspireHEPClient, record_id: str, out_dir: Path, download: bool = True, years_window: int = 5, max_pages: Optional[int] = None) -> Dict[str, Any]:
     ensure_dir(out_dir)
     rec = client.get_record(record_id)
     md_raw = rec.get('metadata', {}) or {}
     meta_norm = client.get_metadata(record_id)
+    
+    if should_skip_document(meta_norm.get('document_type', [])):
+        print(f"  [Skipped Download] {record_id} is {meta_norm.get('document_type')}")
+        download = False
+
+    if max_pages and meta_norm.get('number_of_pages'):
+        try:
+            pages = int(meta_norm.get('number_of_pages'))
+            if pages > max_pages:
+                print(f"  [Skipped Download] {record_id} has {pages} pages (> {max_pages})")
+                download = False
+        except ValueError:
+            pass
+
     item = to_items_metadata(meta_norm)
     
     base_name = dir_name_from_metadata(meta_norm)
@@ -568,6 +663,47 @@ def _gather_candidates_and_duplicates(file_dir: Path, output_dir: Path) -> tuple
             
     return uniques, duplicates_map
 
+def process_zip_file(zip_path: Path):
+    parent = zip_path.parent
+    stem = zip_path.stem
+    img_out = parent / "images"
+    
+    # Determine target filename stem from metadata if available
+    target_stem = stem
+    meta_path = parent / f"{stem}_metadata.json"
+    if meta_path.exists():
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+                title = meta.get('title')
+                if title:
+                    sanitized_title = _sanitize_dir_name(title)
+                    # Truncate to avoid filesystem limits
+                    if len(sanitized_title) > 150:
+                        sanitized_title = sanitized_title[:150]
+                    target_stem = sanitized_title
+        except Exception:
+            pass
+
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            for info in zf.infolist():
+                if info.is_dir(): continue
+                fn = info.filename.strip('/')
+                if fn == 'full.md':
+                    with zf.open(info) as src, open(parent / f"{target_stem}.md", 'wb') as dst:
+                        shutil.copyfileobj(src, dst)
+                elif fn == 'full.json':
+                    with zf.open(info) as src, open(parent / f"{target_stem}.json", 'wb') as dst:
+                        shutil.copyfileobj(src, dst)
+                elif fn.startswith('images/'):
+                    target = img_out / fn.replace('images/', '', 1)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info) as src, open(target, 'wb') as dst:
+                        shutil.copyfileobj(src, dst)
+    except Exception as e:
+        print(f"Failed to process zip {zip_path}: {e}")
+
 def batch_upload(file_names: list[str], unique_dict: dict[str, list[str]], file_dir: Path, header: dict) -> str | None:
     url = "https://mineru.org.cn/api/v4/file-urls/batch"
     data = {
@@ -616,8 +752,9 @@ def batch_retrieve(batch_id: str, unique_dict: dict[str, list[str]], file_dir: P
                 with requests.get(zip_url, stream=True, timeout=60) as r, open(out_path, 'wb') as f:
                     shutil.copyfileobj(r.raw, f)
                 print(f"Downloaded: {out_path}")
+                process_zip_file(out_path)
             except Exception as e:
-                print(f"Download failed for {fname}: {e}")
+                print(f"Download/Process failed for {fname}: {e}")
 
     while True:
         if time.time() - start_time > MAX_WAIT_SECONDS:
@@ -667,47 +804,6 @@ def batch_retrieve(batch_id: str, unique_dict: dict[str, list[str]], file_dir: P
         time.sleep(5)
     print("")
 
-def process_zip_file(zip_path: Path):
-    parent = zip_path.parent
-    stem = zip_path.stem
-    img_out = parent / "images"
-    
-    # Determine target filename stem from metadata if available
-    target_stem = stem
-    meta_path = parent / f"{stem}_metadata.json"
-    if meta_path.exists():
-        try:
-            with open(meta_path, 'r', encoding='utf-8') as f:
-                meta = json.load(f)
-                title = meta.get('title')
-                if title:
-                    sanitized_title = _sanitize_dir_name(title)
-                    # Truncate to avoid filesystem limits
-                    if len(sanitized_title) > 150:
-                        sanitized_title = sanitized_title[:150]
-                    target_stem = sanitized_title
-        except Exception:
-            pass
-
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            for info in zf.infolist():
-                if info.is_dir(): continue
-                fn = info.filename.strip('/')
-                if fn == 'full.md':
-                    with zf.open(info) as src, open(parent / f"{target_stem}.md", 'wb') as dst:
-                        shutil.copyfileobj(src, dst)
-                elif fn == 'full.json':
-                    with zf.open(info) as src, open(parent / f"{target_stem}.json", 'wb') as dst:
-                        shutil.copyfileobj(src, dst)
-                elif fn.startswith('images/'):
-                    target = img_out / fn.replace('images/', '', 1)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with zf.open(info) as src, open(target, 'wb') as dst:
-                        shutil.copyfileobj(src, dst)
-    except Exception as e:
-        print(f"Failed to process zip {zip_path}: {e}")
-
 def replicate_files(file_dir: Path, output_dir: Path):
     for p in file_dir.rglob("*.pdf"):
         rel = p.relative_to(file_dir)
@@ -739,13 +835,43 @@ def convert_pdfs_to_md(teacher: str, pdf_root: Path, md_root: Path, token: str):
     if batch_id:
         print(f"Batch ID: {batch_id}")
         batch_retrieve(batch_id, uniques, file_dir, output_dir, header)
-        for zip_file in output_dir.rglob("*.zip"):
-            process_zip_file(zip_file)
         _replicate_duplicates(duplicates_map, output_dir)
 
 # ==========================================
 # 5. Main Logic
 # ==========================================
+
+def cleanup_intermediate_files(teacher_dir: Path):
+    """
+    Delete intermediate files (.pdf, .zip, .json) and 'images' folder in subdirectories,
+    keeping only .md files.
+    The metadata_items.json in teacher_dir is preserved.
+    """
+    print(f"  Cleaning up intermediate files for {teacher_dir.name}...")
+    for subdir_name in ['main', 'ref1', 'cited']:
+        subdir = teacher_dir / subdir_name
+        if not subdir.exists():
+            continue
+            
+        for p in subdir.iterdir():
+            if p.is_file():
+                # Delete .pdf, .zip
+                if p.suffix.lower() in ['.pdf', '.zip']:
+                    try:
+                        p.unlink()
+                    except Exception as e:
+                        print(f"    Failed to delete {p.name}: {e}")
+                # Delete .json (individual metadata or full.json from extraction)
+                elif p.suffix.lower() == '.json':
+                    try:
+                        p.unlink()
+                    except Exception as e:
+                        print(f"    Failed to delete {p.name}: {e}")
+            elif p.is_dir() and p.name == 'images':
+                try:
+                    shutil.rmtree(p)
+                except Exception as e:
+                    print(f"    Failed to delete images folder in {subdir_name}: {e}")
 
 def parse_papers_data(file_path: Path) -> Dict[str, List[str]]:
     data = {}
@@ -757,6 +883,21 @@ def parse_papers_data(file_path: Path) -> Dict[str, List[str]]:
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
+            if not line or line.startswith('=') or line.startswith('#'):
+                continue
+            
+            # Handle Teacher|DOI format (manuallist.txt)
+            if '|' in line and not line.startswith('👤'):
+                parts = line.split('|')
+                if len(parts) >= 2:
+                    t_name = parts[0].strip()
+                    t_doi = parts[1].strip()
+                    if t_name and t_doi:
+                        if t_name not in data:
+                            data[t_name] = []
+                        data[t_name].append(t_doi)
+                continue
+
             if line.startswith('👤'):
                 if current_teacher: data[current_teacher] = current_dois
                 current_teacher = line.replace('👤', '').strip()
@@ -764,27 +905,39 @@ def parse_papers_data(file_path: Path) -> Dict[str, List[str]]:
             elif line.startswith('DOI:'):
                 doi = line.split(':', 1)[1].strip()
                 if doi: current_dois.append(doi)
+            elif line.startswith('10.'): # Handle raw DOIs from results.txt
+                current_dois.append(line)
+                
         if current_teacher: data[current_teacher] = current_dois
     return data
 
 def process_doi_task(args_tuple):
-    client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher = args_tuple
+    client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher, only_main, metadata_only = args_tuple
     print(f"  Downloading Main DOI: {doi}")
     try:
-        item = process_one_by_doi(client, doi, main_dir, download=True, years_window=years_window)
+        item = process_one_by_doi(client, doi, main_dir, download=not metadata_only, years_window=years_window)
         item['role'] = 'main'
+        
+        # Save metadata immediately
+        teacher_dir = main_dir.parent
+        update_teacher_metadata(teacher_dir, item)
         
         rid = item.get('record_id')
         if not rid: 
             save_progress(f"{teacher}|{doi}")
             return item
 
+        if only_main:
+            print(f"  [Skipped] Related papers for {doi} (Only Main requested)")
+            save_progress(f"{teacher}|{doi}")
+            return item
+
         # Parallel fetch of IDs
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as fetch_executor:
-            # future_ref_ids = fetch_executor.submit(fetch_related_ids, client, rid, 'references', limit_ref)
+            future_ref_ids = fetch_executor.submit(fetch_related_ids, client, rid, 'references', limit_ref)
             future_cited_ids = fetch_executor.submit(fetch_related_ids, client, rid, 'citations', limit_cited, doi)
             
-            ref_ids = [] # future_ref_ids.result()
+            ref_ids = future_ref_ids.result()
             cited_ids = future_cited_ids.result()
 
         # Sampling
@@ -809,11 +962,14 @@ def process_doi_task(args_tuple):
                 if '/' in tid:
                     # Try InspireHEP first
                     try:
-                        t_item = process_one_by_doi(client, tid, tdir, download=True, years_window=years_window)
+                        t_item = process_one_by_doi(client, tid, tdir, download=not metadata_only, years_window=years_window, max_pages=50)
                         t_item['role'] = trole
+                        # Save metadata immediately
+                        teacher_dir = tdir.parent
+                        update_teacher_metadata(teacher_dir, t_item)
                     except Exception as e_inspire:
                         # Fallback to generic downloader if available
-                        if doi_downloader:
+                        if doi_downloader and not metadata_only:
                             print(f"    InspireHEP failed for {tid}, trying generic downloader...")
                             # Use doi_downloader to download PDF
                             # Note: doi_downloader saves to its own structure, we might need to adapt or move file
@@ -857,16 +1013,36 @@ def process_doi_task(args_tuple):
                                     
                                     with open(meta_path, 'w', encoding='utf-8') as f:
                                         json.dump(meta_simple, f, ensure_ascii=False, indent=2)
+                                    
+                                    # Save metadata immediately
+                                    teacher_dir = tdir.parent
+                                    # Convert meta_simple to item format
+                                    simple_item = {
+                                        "title": meta_simple.get("title"),
+                                        "doi": meta_simple.get("doi"),
+                                        "authors": meta_simple.get("authors"),
+                                        "published": parse_year_month(meta_simple.get("publication_date")),
+                                        "role": meta_simple.get("role"),
+                                        "record_id": None,
+                                        "inspire_url": None,
+                                        "citations_count": 0
+                                    }
+                                    update_teacher_metadata(teacher_dir, simple_item)
                                 else:
                                     print(f"    Generic download failed (no URL) for {tid}")
                             else:
                                 print(f"    Generic download failed (no title) for {tid}")
+                        elif metadata_only:
+                             print(f"    InspireHEP failed for {tid}, skipping generic downloader (metadata only mode)")
                         else:
                             raise e_inspire
 
                 else:
-                    t_item = process_one_by_record_id_using_url(client, tid, tdir, download=True, years_window=years_window)
+                    t_item = process_one_by_record_id_using_url(client, tid, tdir, download=not metadata_only, years_window=years_window, max_pages=50)
                     t_item['role'] = trole
+                    # Save metadata immediately
+                    teacher_dir = tdir.parent
+                    update_teacher_metadata(teacher_dir, t_item)
             except Exception as e:
                 print(f"    Failed {trole.capitalize()} {tid}: {e}")
 
@@ -883,8 +1059,12 @@ def process_doi_task(args_tuple):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--papers-data', default=str(PROJ_ROOT / 'inspirehep_source/pre-process/papers_data.txt'))
+    parser.add_argument('--papers-data', default=str(PROJ_ROOT / 'inspirehep_source/pre-process/results.txt'))
+    parser.add_argument('--manual-list', help='Path to manual list file (Teacher|DOI format)')
     parser.add_argument('--token', default=os.getenv('MINERU_TOKEN'))
+    parser.add_argument('--teacher', help='Specify a single teacher to process')
+    parser.add_argument('--only-main', action='store_true', help='Only download main papers, skip references and citations')
+    parser.add_argument('--metadata-only', action='store_true', help='Only process metadata, skip PDF download and ignore processed status')
     args = parser.parse_args()
 
     if not args.token:
@@ -897,6 +1077,14 @@ def main():
     limit_ref, limit_cited = get_limit_cfg(config)
     
     papers_data = parse_papers_data(Path(args.papers_data))
+    
+    if args.teacher:
+        if args.teacher in papers_data:
+            papers_data = {args.teacher: papers_data[args.teacher]}
+        else:
+            print(f"Error: Teacher '{args.teacher}' not found in papers data.")
+            return
+
     processed_records = load_progress()
     
     data_root = PROJ_ROOT / 'data'
@@ -915,10 +1103,10 @@ def main():
         # Prepare tasks
         tasks = []
         for doi in dois:
-            if f"{teacher}|{doi}" in processed_records:
+            if not args.metadata_only and f"{teacher}|{doi}" in processed_records:
                 print(f"  [Skipped] {doi} (Already processed)")
                 continue
-            tasks.append((client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher))
+            tasks.append((client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher, args.only_main, args.metadata_only))
         
         if tasks:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers_main) as executor:
@@ -934,7 +1122,7 @@ def main():
             print(f"  Skipping PDF to MD conversion for {teacher} (no token).")
         
         # 4. Generate Metadata JSON
-        all_items = []
+        new_items = []
         for subdir in [main_dir, ref_dir, cited_dir]:
             if not subdir.exists(): continue
             for meta_file in subdir.glob('*_metadata.json'):
@@ -958,12 +1146,47 @@ def main():
                         pub_year = item.get("published", {}).get("year")
                         ya = compute_young_author_fields(client, item.get("authors", []), pub_year, years_window)
                         item.update(ya)
-                        all_items.append(item)
-                except Exception: pass
+                        new_items.append(item)
+                except Exception as e:
+                    print(f"  Error processing metadata file {meta_file}: {e}")
         
-        with open(teacher_dir / 'metadata_items.json', 'w', encoding='utf-8') as f:
-            json.dump({"items": all_items}, f, ensure_ascii=False, indent=2)
-        print(f"  Metadata saved to {teacher_dir / 'metadata_items.json'}")
+        # Merge with existing metadata
+        metadata_file = teacher_dir / 'metadata_items.json'
+        existing_items = []
+        if metadata_file.exists():
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+                    existing_items = existing_data.get("items", [])
+            except Exception as e:
+                print(f"  Warning: Failed to load existing metadata from {metadata_file}: {e}")
+
+        # Deduplicate by DOI (or record_id, or title)
+        merged_map = {}
+        
+        def get_key(itm):
+            return itm.get("doi") or itm.get("record_id") or itm.get("title")
+
+        # Add existing items first
+        for item in existing_items:
+            k = get_key(item)
+            if k:
+                merged_map[k] = item
+        
+        # Add/Update with new items
+        for item in new_items:
+            k = get_key(item)
+            if k:
+                merged_map[k] = item
+
+        final_items = list(merged_map.values())
+
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump({"items": final_items}, f, ensure_ascii=False, indent=2)
+        print(f"  Metadata saved to {metadata_file} (Merged {len(existing_items)} old + {len(new_items)} new -> {len(final_items)} total)")
+
+        # 5. Cleanup Intermediate Files
+        cleanup_intermediate_files(teacher_dir)
 
 if __name__ == '__main__':
     main()
