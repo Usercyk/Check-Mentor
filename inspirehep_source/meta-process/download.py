@@ -71,12 +71,21 @@ def update_teacher_metadata(teacher_dir: Path, new_item: Dict[str, Any]):
             print(f"  Error saving metadata to {metadata_file}: {e}")
 
 # Import generic downloader
-sys.path.append(str(PROJ_ROOT / 'DOI_source'))
+# Use importlib to avoid name collision with current script (also named download.py)
+import importlib.util
 try:
-    import download as doi_downloader
-except ImportError:
+    doi_source_path = PROJ_ROOT / 'DOI_source' / 'download.py'
+    if doi_source_path.exists():
+        spec = importlib.util.spec_from_file_location("doi_downloader_module", doi_source_path)
+        doi_downloader = importlib.util.module_from_spec(spec)
+        sys.modules["doi_downloader_module"] = doi_downloader
+        spec.loader.exec_module(doi_downloader)
+    else:
+        doi_downloader = None
+        print(f"Warning: DOI source file not found at {doi_source_path}")
+except Exception as e:
     doi_downloader = None
-    print("Warning: Could not import doi_downloader from DOI_source")
+    print(f"Warning: Could not import doi_downloader from DOI_source: {e}")
 
 def load_config():
     config = configparser.ConfigParser()
@@ -1028,11 +1037,75 @@ def parse_papers_data(file_path: Path) -> Dict[str, List[str]]:
         if current_teacher: data[current_teacher] = current_dois
     return data
 
-def process_doi_task(args_tuple):
-    client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher, only_main, metadata_only = args_tuple
-    print(f"  Downloading Main DOI: {doi}")
+def process_one_by_doi_generic(client, doi, output_dir, role='main', download=True):
+    if not doi_downloader:
+        raise ImportError("doi_downloader not available")
+        
+    print(f"    [Generic] Processing {doi}...")
+    official_title = doi_downloader.get_official_title_from_doi(doi)
+    if not official_title:
+        raise ValueError(f"Could not get title for {doi}")
+        
+    base_name = _sanitize_dir_name(doi)
+    
+    if download:
+        pdf_url = doi_downloader.get_pdf_from_publisher(doi)
+        if not pdf_url:
+            pdf_url = doi_downloader.get_pdf_from_unpaywall(doi, None)
+        if not pdf_url:
+            try:
+                pdf_url = doi_downloader.GetDownloadUrl(doi)
+            except Exception: pass
+            
+        if not pdf_url:
+            raise ValueError(f"Could not get PDF URL for {doi}")
+            
+        pdf_path = output_dir / f"{base_name}.pdf"
+        client.download_file(pdf_url, str(pdf_path))
+
+    # Create minimal metadata
+    meta_path = output_dir / f"{base_name}_metadata.json"
+    meta_simple = {
+        "doi": doi,
+        "title": official_title,
+        "authors": [],
+        "role": role
+    }
+    # Try to enrich with CrossRef
     try:
-        item = process_one_by_doi(client, doi, main_dir, download=not metadata_only, years_window=years_window)
+        cr_meta = doi_downloader.get_crossref_metadata(doi)
+        if cr_meta:
+            meta_simple["title"] = cr_meta.get('title', [official_title])[0]
+            meta_simple["authors"] = doi_downloader._extract_authors_from_meta(cr_meta)
+            y, m = doi_downloader._extract_pub_year_month(cr_meta)
+            if y: meta_simple["publication_date"] = f"{y}-{m}" if m else str(y)
+    except Exception: pass
+    
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(meta_simple, f, ensure_ascii=False, indent=2)
+            
+    # Convert to item format
+    item = {
+        "title": meta_simple.get("title"),
+        "doi": meta_simple.get("doi"),
+        "authors": meta_simple.get("authors"),
+        "published": parse_year_month(meta_simple.get("publication_date")),
+        "role": meta_simple.get("role"),
+        "record_id": None,
+        "inspire_url": None,
+        "citations_count": 0
+    }
+    return item
+
+def process_doi_task(args_tuple):
+    client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher, only_main, metadata_only, method = args_tuple
+    print(f"  Downloading Main DOI: {doi} (Method: {method})")
+    try:
+        if method == 'doi_source':
+             item = process_one_by_doi_generic(client, doi, main_dir, role='main', download=not metadata_only)
+        else:
+             item = process_one_by_doi(client, doi, main_dir, download=not metadata_only, years_window=years_window)
+        
         item['role'] = 'main'
         
         # Save metadata immediately
@@ -1040,9 +1113,24 @@ def process_doi_task(args_tuple):
         update_teacher_metadata(teacher_dir, item)
         
         rid = item.get('record_id')
-        if not rid: 
+        if not rid and method != 'doi_source': 
             save_progress(teacher, doi)
             return item
+        
+        # If method is doi_source, we might not have record_id, but we still want to fetch related papers if possible.
+        # But fetch_related_ids needs record_id (for inspire) or DOI (for openalex).
+        # If we have DOI, we can use OpenAlex for citations.
+        # For references, we need record_id for Inspire, or we can use OpenAlex if we implement it.
+        # fetch_related_ids supports DOI for citations (OpenAlex).
+        # For references, it currently only supports Inspire record_id.
+        
+        if method == 'doi_source' and not rid:
+            # Try to get record_id from Inspire using DOI, just for fetching references
+             try:
+                 rec = client.get_record_by_doi(doi)
+                 if rec:
+                     rid = rec.get('id') or rec.get('metadata', {}).get('control_number')
+             except Exception: pass
 
         if only_main:
             print(f"  [Skipped] Related papers for {doi} (Only Main requested)")
@@ -1051,10 +1139,18 @@ def process_doi_task(args_tuple):
 
         # Parallel fetch of IDs
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as fetch_executor:
-            future_ref_ids = fetch_executor.submit(fetch_related_ids, client, rid, 'references', limit_ref)
-            future_cited_ids = fetch_executor.submit(fetch_related_ids, client, rid, 'citations', limit_cited, doi)
+            # If we have rid, we can fetch references from Inspire
+            if rid:
+                future_ref_ids = fetch_executor.submit(fetch_related_ids, client, str(rid), 'references', limit_ref)
+            else:
+                # TODO: Implement OpenAlex references fetching if needed
+                future_ref_ids = None
+                
+            # For citations, we can use DOI (OpenAlex) or rid (Inspire)
+            # fetch_related_ids uses OpenAlex if kind='citations' and doi is provided
+            future_cited_ids = fetch_executor.submit(fetch_related_ids, client, str(rid) if rid else "", 'citations', limit_cited, doi)
             
-            ref_ids = future_ref_ids.result()
+            ref_ids = future_ref_ids.result() if future_ref_ids else []
             cited_ids = future_cited_ids.result()
 
         # Sampling
@@ -1082,90 +1178,114 @@ def process_doi_task(args_tuple):
 
             print(f"    Downloading {trole.capitalize()}: {tid}")
             try:
-                if '/' in tid:
-                    # Try InspireHEP first
-                    try:
-                        t_item = process_one_by_doi(client, tid, tdir, download=not metadata_only, years_window=years_window, max_pages=50)
+                if method == 'doi_source':
+                    # Resolve to DOI if needed
+                    target_doi = tid
+                    if '/' not in tid: # Likely a record ID
+                         try:
+                             rec = client.get_record(tid, fields="metadata.dois")
+                             dois = (rec.get('metadata', {}) or {}).get('dois', [])
+                             if dois:
+                                 target_doi = dois[0].get('value')
+                         except Exception: pass
+                    
+                    if target_doi and '/' in target_doi:
+                        # Use generic
+                        t_item = process_one_by_doi_generic(client, target_doi, tdir, role=trole, download=not metadata_only)
+                        # Save metadata immediately
+                        teacher_dir = tdir.parent
+                        update_teacher_metadata(teacher_dir, t_item)
+                    else:
+                        # Fallback to inspire if no DOI found
+                        t_item = process_one_by_record_id_using_url(client, tid, tdir, download=not metadata_only, years_window=years_window, max_pages=50)
+                        t_item['role'] = trole
+                        teacher_dir = tdir.parent
+                        update_teacher_metadata(teacher_dir, t_item)
+                else:
+                    if '/' in tid:
+                        # Try InspireHEP first
+                        try:
+                            t_item = process_one_by_doi(client, tid, tdir, download=not metadata_only, years_window=years_window, max_pages=50)
+                            t_item['role'] = trole
+                            # Save metadata immediately
+                            teacher_dir = tdir.parent
+                            update_teacher_metadata(teacher_dir, t_item)
+                        except Exception as e_inspire:
+                            # Fallback to generic downloader if available
+                            if doi_downloader and not metadata_only:
+                                print(f"    InspireHEP failed for {tid}, trying generic downloader...")
+                                # Use doi_downloader to download PDF
+                                # Note: doi_downloader saves to its own structure, we might need to adapt or move file
+                                # For simplicity, we call download_and_process_doi but we need to handle the output path
+                                # Or better, use DownloadFileByUrl directly if we can get a URL
+                                
+                                # Let's try to use doi_downloader's logic to get PDF URL and download to our tdir
+                                official_title = doi_downloader.get_official_title_from_doi(tid)
+                                if official_title:
+                                    # Try to get PDF URL
+                                    pdf_url = doi_downloader.get_pdf_from_publisher(tid)
+                                    if not pdf_url:
+                                        pdf_url = doi_downloader.get_pdf_from_unpaywall(tid, None)
+                                    if not pdf_url:
+                                        try:
+                                            pdf_url = doi_downloader.GetDownloadUrl(tid)
+                                        except Exception: pass
+                                    
+                                    if pdf_url:
+                                        base_name = _sanitize_dir_name(tid)
+                                        pdf_path = tdir / f"{base_name}.pdf"
+                                        client.download_file(pdf_url, str(pdf_path))
+                                        
+                                        # Create minimal metadata
+                                        meta_path = tdir / f"{base_name}_metadata.json"
+                                        meta_simple = {
+                                            "doi": tid,
+                                            "title": official_title,
+                                            "authors": [], # We could fetch from CrossRef if needed
+                                            "role": trole
+                                        }
+                                        # Try to enrich with CrossRef
+                                        try:
+                                            cr_meta = doi_downloader.get_crossref_metadata(tid)
+                                            if cr_meta:
+                                                meta_simple["title"] = cr_meta.get('title', [official_title])[0]
+                                                meta_simple["authors"] = doi_downloader._extract_authors_from_meta(cr_meta)
+                                                y, m = doi_downloader._extract_pub_year_month(cr_meta)
+                                                if y: meta_simple["publication_date"] = f"{y}-{m}" if m else str(y)
+                                        except Exception: pass
+                                        
+                                        with open(meta_path, 'w', encoding='utf-8') as f:
+                                            json.dump(meta_simple, f, ensure_ascii=False, indent=2)
+                                        
+                                        # Save metadata immediately
+                                        teacher_dir = tdir.parent
+                                        # Convert meta_simple to item format
+                                        simple_item = {
+                                            "title": meta_simple.get("title"),
+                                            "doi": meta_simple.get("doi"),
+                                            "authors": meta_simple.get("authors"),
+                                            "published": parse_year_month(meta_simple.get("publication_date")),
+                                            "role": meta_simple.get("role"),
+                                            "record_id": None,
+                                            "inspire_url": None,
+                                            "citations_count": 0
+                                        }
+                                        update_teacher_metadata(teacher_dir, simple_item)
+                                    else:
+                                        print(f"    Generic download failed (no URL) for {tid}")
+                                else:
+                                    print(f"    Generic download failed (no title) for {tid}")
+                            elif metadata_only:
+                                 print(f"    InspireHEP failed for {tid}, skipping generic downloader (metadata only mode)")
+                            else:
+                                raise e_inspire
+
+                    else:
+                        t_item = process_one_by_record_id_using_url(client, tid, tdir, download=not metadata_only, years_window=years_window, max_pages=50)
                         t_item['role'] = trole
                         # Save metadata immediately
                         teacher_dir = tdir.parent
                         update_teacher_metadata(teacher_dir, t_item)
-                    except Exception as e_inspire:
-                        # Fallback to generic downloader if available
-                        if doi_downloader and not metadata_only:
-                            print(f"    InspireHEP failed for {tid}, trying generic downloader...")
-                            # Use doi_downloader to download PDF
-                            # Note: doi_downloader saves to its own structure, we might need to adapt or move file
-                            # For simplicity, we call download_and_process_doi but we need to handle the output path
-                            # Or better, use DownloadFileByUrl directly if we can get a URL
-                            
-                            # Let's try to use doi_downloader's logic to get PDF URL and download to our tdir
-                            official_title = doi_downloader.get_official_title_from_doi(tid)
-                            if official_title:
-                                # Try to get PDF URL
-                                pdf_url = doi_downloader.get_pdf_from_publisher(tid)
-                                if not pdf_url:
-                                    pdf_url = doi_downloader.get_pdf_from_unpaywall(tid, None)
-                                if not pdf_url:
-                                    try:
-                                        pdf_url = doi_downloader.GetDownloadUrl(tid)
-                                    except Exception: pass
-                                
-                                if pdf_url:
-                                    base_name = _sanitize_dir_name(tid)
-                                    pdf_path = tdir / f"{base_name}.pdf"
-                                    client.download_file(pdf_url, str(pdf_path))
-                                    
-                                    # Create minimal metadata
-                                    meta_path = tdir / f"{base_name}_metadata.json"
-                                    meta_simple = {
-                                        "doi": tid,
-                                        "title": official_title,
-                                        "authors": [], # We could fetch from CrossRef if needed
-                                        "role": trole
-                                    }
-                                    # Try to enrich with CrossRef
-                                    try:
-                                        cr_meta = doi_downloader.get_crossref_metadata(tid)
-                                        if cr_meta:
-                                            meta_simple["title"] = cr_meta.get('title', [official_title])[0]
-                                            meta_simple["authors"] = doi_downloader._extract_authors_from_meta(cr_meta)
-                                            y, m = doi_downloader._extract_pub_year_month(cr_meta)
-                                            if y: meta_simple["publication_date"] = f"{y}-{m}" if m else str(y)
-                                    except Exception: pass
-                                    
-                                    with open(meta_path, 'w', encoding='utf-8') as f:
-                                        json.dump(meta_simple, f, ensure_ascii=False, indent=2)
-                                    
-                                    # Save metadata immediately
-                                    teacher_dir = tdir.parent
-                                    # Convert meta_simple to item format
-                                    simple_item = {
-                                        "title": meta_simple.get("title"),
-                                        "doi": meta_simple.get("doi"),
-                                        "authors": meta_simple.get("authors"),
-                                        "published": parse_year_month(meta_simple.get("publication_date")),
-                                        "role": meta_simple.get("role"),
-                                        "record_id": None,
-                                        "inspire_url": None,
-                                        "citations_count": 0
-                                    }
-                                    update_teacher_metadata(teacher_dir, simple_item)
-                                else:
-                                    print(f"    Generic download failed (no URL) for {tid}")
-                            else:
-                                print(f"    Generic download failed (no title) for {tid}")
-                        elif metadata_only:
-                             print(f"    InspireHEP failed for {tid}, skipping generic downloader (metadata only mode)")
-                        else:
-                            raise e_inspire
-
-                else:
-                    t_item = process_one_by_record_id_using_url(client, tid, tdir, download=not metadata_only, years_window=years_window, max_pages=50)
-                    t_item['role'] = trole
-                    # Save metadata immediately
-                    teacher_dir = tdir.parent
-                    update_teacher_metadata(teacher_dir, t_item)
                 
                 # Save progress for related item
                 save_progress(teacher, tid)
@@ -1192,7 +1312,20 @@ def main():
     parser.add_argument('--only-main', action='store_true', help='Only download main papers, skip references and citations')
     parser.add_argument('--metadata-only', action='store_true', help='Only process metadata, skip PDF download and ignore processed status')
     parser.add_argument('--force', action='store_true', help='Force re-process even if already processed. Will reset progress for the target teacher(s).')
+    parser.add_argument('--method', choices=['inspire', 'doi_source'], default='inspire', help='Download method to use')
     args = parser.parse_args()
+
+    if args.method == 'doi_source':
+        if doi_downloader:
+            # Monkeypatch OUTPUT_ROOT_PDF to point to data directory
+            # doi_downloader uses os.path.join(OUTPUT_ROOT_PDF, folder_teacher, subdirectory)
+            # We want data/Teacher/subdirectory
+            # So OUTPUT_ROOT_PDF should be PROJ_ROOT / 'data'
+            doi_downloader.OUTPUT_ROOT_PDF = str(PROJ_ROOT / 'data')
+            print(f"Using DOI Source method. Output root set to: {doi_downloader.OUTPUT_ROOT_PDF}")
+        else:
+            print("Error: doi_downloader module not available. Cannot use doi_source method.")
+            return
 
     if not args.token:
         print("Warning: MINERU_TOKEN is missing. PDF to MD conversion will be skipped.")
@@ -1246,7 +1379,7 @@ def main():
             if not args.metadata_only and doi in processed_records.get(teacher, set()):
                 print(f"  [Skipped] {doi} (Already processed)")
                 continue
-            tasks.append((client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher, args.only_main, args.metadata_only))
+            tasks.append((client, doi, main_dir, ref_dir, cited_dir, sample_size, years_window, workers_related, limit_ref, limit_cited, teacher, args.only_main, args.metadata_only, args.method))
         
         if tasks:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers_main) as executor:

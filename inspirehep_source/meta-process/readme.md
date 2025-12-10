@@ -13,6 +13,8 @@ python inspirehep_source/meta-process/download.py --teacher "曹庆宏"  --metad
 
 --force 强制重置
 
+--method doi_source 强制降级
+
 # 其他工具
 
 python tool/update_have_md.py
