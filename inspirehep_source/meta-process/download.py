@@ -84,6 +84,71 @@ def load_config():
         config.read(CONFIG_PATH, encoding='utf-8')
     return config
 
+def sync_processed_from_metadata():
+    """
+    Sync processed status from metadata_items.json files.
+    If have_md is true, add DOI and record_id to processed cache.
+    """
+    global GLOBAL_PROCESSED_CACHE
+    if GLOBAL_PROCESSED_CACHE is None:
+        return
+
+    data_dir = PROJ_ROOT / 'data'
+    if not data_dir.exists():
+        return
+
+    print("Syncing processed status from metadata...")
+    count = 0
+    
+    for teacher_dir in data_dir.iterdir():
+        if not teacher_dir.is_dir():
+            continue
+            
+        teacher_name = teacher_dir.name
+        metadata_file = teacher_dir / 'metadata_items.json'
+        
+        if not metadata_file.exists():
+            continue
+            
+        try:
+            with open(metadata_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            items = data.get("items", [])
+            if teacher_name not in GLOBAL_PROCESSED_CACHE:
+                GLOBAL_PROCESSED_CACHE[teacher_name] = set()
+                
+            teacher_cache = GLOBAL_PROCESSED_CACHE[teacher_name]
+            
+            for item in items:
+                if item.get("have_md") is True:
+                    doi = item.get("doi")
+                    rid = item.get("record_id")
+                    
+                    added = False
+                    if doi and doi not in teacher_cache:
+                        teacher_cache.add(doi)
+                        added = True
+                    if rid and str(rid) not in teacher_cache:
+                        teacher_cache.add(str(rid))
+                        added = True
+                        
+                    if added:
+                        count += 1
+                        
+        except Exception as e:
+            print(f"  Error reading metadata for {teacher_name}: {e}")
+            
+    if count > 0:
+        print(f"  Added {count} items to processed cache from metadata.")
+        # Save updated cache
+        try:
+            with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                json_data = {k: list(v) for k, v in GLOBAL_PROCESSED_CACHE.items()}
+                json.dump(json_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Failed to save synced progress: {e}")
+
 def load_progress() -> Dict[str, set[str]]:
     global GLOBAL_PROCESSED_CACHE
     if GLOBAL_PROCESSED_CACHE is not None:
@@ -131,6 +196,7 @@ def load_progress() -> Dict[str, set[str]]:
             print(f"Failed to save migrated progress: {e}")
             
     GLOBAL_PROCESSED_CACHE = data
+    sync_processed_from_metadata()
     return GLOBAL_PROCESSED_CACHE
 
 def save_progress(teacher: str, doi: str):
@@ -1008,6 +1074,12 @@ def process_doi_task(args_tuple):
             tid = task['id']
             tdir = task['dir']
             trole = task['role']
+            
+            # Check if already processed
+            if GLOBAL_PROCESSED_CACHE and teacher in GLOBAL_PROCESSED_CACHE:
+                if tid in GLOBAL_PROCESSED_CACHE[teacher]:
+                    return
+
             print(f"    Downloading {trole.capitalize()}: {tid}")
             try:
                 if '/' in tid:
@@ -1094,6 +1166,9 @@ def process_doi_task(args_tuple):
                     # Save metadata immediately
                     teacher_dir = tdir.parent
                     update_teacher_metadata(teacher_dir, t_item)
+                
+                # Save progress for related item
+                save_progress(teacher, tid)
             except Exception as e:
                 print(f"    Failed {trole.capitalize()} {tid}: {e}")
 
@@ -1116,6 +1191,7 @@ def main():
     parser.add_argument('--teacher', help='Specify a single teacher to process')
     parser.add_argument('--only-main', action='store_true', help='Only download main papers, skip references and citations')
     parser.add_argument('--metadata-only', action='store_true', help='Only process metadata, skip PDF download and ignore processed status')
+    parser.add_argument('--force', action='store_true', help='Force re-process even if already processed. Will reset progress for the target teacher(s).')
     args = parser.parse_args()
 
     if not args.token:
@@ -1142,6 +1218,19 @@ def main():
     
     for teacher, dois in papers_data.items():
         print(f"\nProcessing Teacher: {teacher}")
+        
+        if args.force:
+            print(f"  [Force Mode] Resetting progress for {teacher}...")
+            with PROGRESS_LOCK:
+                if teacher in processed_records:
+                    processed_records[teacher] = set()
+                    try:
+                        with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                            json_data = {k: list(v) for k, v in processed_records.items()}
+                            json.dump(json_data, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        print(f"Failed to clear progress file: {e}")
+        
         teacher_dir = data_root / teacher
         main_dir = teacher_dir / 'main'
         ref_dir = teacher_dir / 'ref1'
