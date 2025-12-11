@@ -8,6 +8,7 @@ import argparse
 try:
     import matplotlib.pyplot as plt
     import pandas as pd
+    import numpy as np
     HAS_VIZ_LIBS = True
 except ImportError:
     HAS_VIZ_LIBS = False
@@ -79,14 +80,78 @@ def analyze_progress(data_dir: Path):
             
     return stats
 
+def merge_and_sort_stats(stats):
+    """
+    合并同名老师（Teacher 和 Teacher+）并按总条目数排序
+    如果有合并（存在 Teacher+），在名字后标记 (+)
+    """
+    groups = {}
+    for item in stats:
+        name = item['Teacher']
+        base_name = name[:-1] if name.endswith('+') else name
+        if base_name not in groups:
+            groups[base_name] = {
+                "Teacher": base_name,
+                "Total Items": 0,
+                "Total MD": 0,
+                "Main Total": 0,
+                "Main MD": 0,
+                "Ref Total": 0,
+                "Ref MD": 0,
+                "Cited Total": 0,
+                "Cited MD": 0,
+                "has_plus": False,
+                "Base Total Items": 0,
+                "Base Total MD": 0,
+                "Plus Total Items": 0,
+                "Plus Total MD": 0,
+                "Base Main Total": 0,
+                "Plus Main Total": 0
+            }
+        
+        g = groups[base_name]
+        
+        if name.endswith('+'):
+            g["has_plus"] = True
+            g["Plus Total Items"] += item["Total Items"]
+            g["Plus Total MD"] += item["Total MD"]
+            g["Plus Main Total"] += item["Main Total"]
+        else:
+            g["Base Total Items"] += item["Total Items"]
+            g["Base Total MD"] += item["Total MD"]
+            g["Base Main Total"] += item["Main Total"]
+
+        g["Total Items"] += item["Total Items"]
+        g["Total MD"] += item["Total MD"]
+        g["Main Total"] += item["Main Total"]
+        g["Main MD"] += item["Main MD"]
+        g["Ref Total"] += item["Ref Total"]
+        g["Ref MD"] += item["Ref MD"]
+        g["Cited Total"] += item["Cited Total"]
+        g["Cited MD"] += item["Cited MD"]
+
+    # 计算百分比并转为列表
+    merged_stats = []
+    for base_name, g in groups.items():
+        g.pop("has_plus")
+            
+        total = g["Total Items"]
+        g["Completion %"] = (g["Total MD"] / total * 100) if total > 0 else 0.0
+        merged_stats.append(g)
+    
+    # 按总条目数降序排序
+    merged_stats.sort(key=lambda x: x["Total Items"], reverse=True)
+    
+    return merged_stats
+
 def print_text_report(stats):
     """打印文本报告"""
     if not stats:
         print("没有找到数据。")
         return
 
-    # 按总数降序排序
-    stats.sort(key=lambda x: x["Total Items"], reverse=True)
+    # 使用合并排序
+    stats = merge_and_sort_stats(stats)
     
     print("\n" + "="*110)
     print(f"{'老师':<10} | {'总数':<6} | {'原文':<6} | {'已完成':<6} | {'进度':<6} | {'主文章 (完/总)':<15} | {'参考文献 (完/总)':<15} | {'引用 (完/总)':<15}")
@@ -119,43 +184,87 @@ def generate_chart(stats, output_file):
     if not stats:
         return
 
+    # 使用合并排序
+    stats = merge_and_sort_stats(stats)
     df = pd.DataFrame(stats)
-    df = df.sort_values("Total Items", ascending=False)
+    # df = df.sort_values("Total Items", ascending=False)
     
     # 设置中文字体
     plt.rcParams['font.sans-serif'] = get_chinese_font() + plt.rcParams['font.sans-serif']
     plt.rcParams['axes.unicode_minus'] = False
     
     # 设置图表大小
-    plt.figure(figsize=(20, 10))
+    plt.figure(figsize=(24, 12))
     
-    x = range(len(df))
-    width = 0.35
+    # 使用分段线性缩放 (Piecewise Linear Scaling)
+    # 0-200: 线性 (1:1) - 重点展示区域
+    # >200:  压缩 (1:0.15) - 缩小大数据以便观看
+    threshold = 200
+    compression = 0.15
+    
+    def forward(x):
+        return np.where(x < threshold, x, threshold + (x - threshold) * compression)
+
+    def inverse(x):
+        return np.where(x < threshold, x, threshold + (x - threshold) / compression)
+
+    try:
+        plt.yscale('function', functions=(forward, inverse))
+        # 手动设置 Y 轴刻度以显示压缩效果
+        major_ticks = [0, 50, 100, 150, 200, 300, 400, 500, 750, 1000]
+        plt.yticks(major_ticks)
+    except Exception as e:
+        print(f"设置自定义缩放失败，回退到对数刻度: {e}")
+        plt.yscale('symlog')
+
+    plt.grid(True, axis='y', which='major', linestyle='--', alpha=0.3)
+    
+    x = list(range(len(df)))
+    
+    # 调整柱状图宽度
+    width_total = 0.85
+    width_sub = 0.35
     
     # 绘制柱状图
-    plt.bar(x, df["Total Items"], width, label='总条目数 (Total Items)', color='#e0e0e0', edgecolor='grey')
-    plt.bar(x, df["Total MD"], width, label='已转换 MD (Converted)', color='#4caf50', edgecolor='darkgreen')
+    # Total Items (Base) - 背景宽柱
+    plt.bar(x, df["Base Total Items"], width_total, label='基础条目 (Base Items)', color='#f5f5f5', edgecolor='#bdbdbd')
+    # Total Items (Plus) - Stacked on Base
+    plt.bar(x, df["Plus Total Items"], width_total, bottom=df["Base Total Items"], label='增补条目 (Plus Items)', color='#e0e0e0', edgecolor='#bdbdbd')
     
-    # 绘制原文数量折线
-    plt.plot(x, df["Main Total"], color='#2196F3', marker='o', linewidth=2, label='原文数量 (Main Items)', linestyle='-')
+    # Main Total (Left) - 左侧中柱
+    x_left = [i - 0.2 for i in x]
+    plt.bar(x_left, df["Base Main Total"], width_sub, label='基础原文 (Base Main)', color='#90caf9', edgecolor='#1976D2', alpha=0.9)
+    plt.bar(x_left, df["Plus Main Total"], width_sub, bottom=df["Base Main Total"], label='增补原文 (Plus Main)', color='#f48fb1', edgecolor='#C2185B', alpha=0.9)
+
+    # Total MD (Right) - 右侧中柱
+    x_right = [i + 0.2 for i in x]
+    plt.bar(x_right, df["Base Total MD"], width_sub, label='基础已转 (Base MD)', color='#a5d6a7', edgecolor='#2e7d32', alpha=0.9)
+    plt.bar(x_right, df["Plus Total MD"], width_sub, bottom=df["Base Total MD"], label='增补已转 (Plus MD)', color='#ffcc80', edgecolor='#ef6c00', alpha=0.9)
     
     # 添加标题和标签
-    plt.ylabel('文章数量 (Count)', fontsize=12)
-    plt.title('各老师文献处理进度 (Project Progress by Teacher)', fontsize=16)
-    plt.xticks(x, df["Teacher"], rotation=45, ha='right', fontsize=10)
-    plt.legend(fontsize=12)
+    plt.ylabel('文章数量 (Count)', fontsize=14)
+    plt.title('各老师文献处理进度 (Project Progress by Teacher)', fontsize=18)
+    plt.xticks(x, df["Teacher"], rotation=90, ha='center', fontsize=10) # 旋转90度以适应更多标签
+    plt.legend(fontsize=12, loc='upper right')
     
     # 在柱子上添加数值标签
-    for i, v in enumerate(df["Total Items"]):
-        plt.text(i, v + 1, str(v), ha='center', va='bottom', fontsize=8, color='grey')
+    # 总数标签 (Total Items) - 放在宽柱顶部
+    for i, (base, plus) in enumerate(zip(df["Base Total Items"], df["Plus Total Items"])):
+        total = base + plus
+        if total > 0:
+            plt.text(i, total * 1.1, str(total), ha='center', va='bottom', fontsize=8, color='grey')
         
-    for i, v in enumerate(df["Total MD"]):
-        if v > 0:
-            plt.text(i, v/2, str(v), ha='center', va='center', fontsize=8, color='white', fontweight='bold')
+    # 原文标签 (Main Total) - 放在左侧柱子
+    for i, (base, plus) in enumerate(zip(df["Base Main Total"], df["Plus Main Total"])):
+        total = base + plus
+        if total > 0:
+            plt.text(i - 0.2, total, str(total), ha='center', va='bottom', fontsize=8, color='#0d47a1', fontweight='bold')
 
-    # 添加原文数量标签
-    for i, v in enumerate(df["Main Total"]):
-        plt.text(i, v + 3, str(v), ha='center', va='bottom', fontsize=9, color='#2196F3', fontweight='bold')
+    # 已完成标签 (Total MD) - 放在右侧柱子
+    for i, (base, plus) in enumerate(zip(df["Base Total MD"], df["Plus Total MD"])):
+        total = base + plus
+        if total > 0:
+            plt.text(i + 0.2, total, str(total), ha='center', va='bottom', fontsize=8, color='#1b5e20', fontweight='bold')
 
     plt.tight_layout()
     

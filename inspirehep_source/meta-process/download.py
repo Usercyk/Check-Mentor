@@ -1313,6 +1313,7 @@ def main():
     parser.add_argument('--metadata-only', action='store_true', help='Only process metadata, skip PDF download and ignore processed status')
     parser.add_argument('--force', action='store_true', help='Force re-process even if already processed. Will reset progress for the target teacher(s).')
     parser.add_argument('--method', choices=['inspire', 'doi_source'], default='inspire', help='Download method to use')
+    parser.add_argument('--retry', action='store_true', help='Retry downloading items present in metadata but missing MD files')
     args = parser.parse_args()
 
     if args.method == 'doi_source':
@@ -1322,6 +1323,8 @@ def main():
             # We want data/Teacher/subdirectory
             # So OUTPUT_ROOT_PDF should be PROJ_ROOT / 'data'
             doi_downloader.OUTPUT_ROOT_PDF = str(PROJ_ROOT / 'data')
+            # Enable production mode to simplify output
+            doi_downloader.production_mode = True
             print(f"Using DOI Source method. Output root set to: {doi_downloader.OUTPUT_ROOT_PDF}")
         else:
             print("Error: doi_downloader module not available. Cannot use doi_source method.")
@@ -1352,6 +1355,13 @@ def main():
     for teacher, dois in papers_data.items():
         print(f"\nProcessing Teacher: {teacher}")
         
+        if args.retry:
+            retry_missing_items(teacher, data_root, InspireHEPClient(), sample_size, years_window, workers_related, limit_ref, limit_cited, args.method)
+            if args.token:
+                print(f"  Converting PDFs to MD for {teacher}...")
+                convert_pdfs_to_md(teacher, data_root, data_root, args.token)
+            continue
+
         if args.force:
             print(f"  [Force Mode] Resetting progress for {teacher}...")
             with PROGRESS_LOCK:
@@ -1460,6 +1470,88 @@ def main():
 
         # 5. Cleanup Intermediate Files
         cleanup_intermediate_files(teacher_dir)
+
+def retry_missing_items(teacher, data_root, client, sample_size, years_window, workers_related, limit_ref, limit_cited, method):
+    teacher_dir = data_root / teacher
+    metadata_file = teacher_dir / 'metadata_items.json'
+    if not metadata_file.exists():
+        print(f"  No metadata file found for {teacher}, skipping retry.")
+        return
+
+    try:
+        with open(metadata_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            items = data.get("items", [])
+    except Exception as e:
+        print(f"  Error loading metadata for {teacher}: {e}")
+        return
+
+    tasks = []
+    main_dir = teacher_dir / 'main'
+    ref_dir = teacher_dir / 'ref1'
+    cited_dir = teacher_dir / 'cited'
+
+    print(f"  Checking {len(items)} items for missing MD files...")
+    
+    for item in items:
+        doi = item.get("doi")
+        record_id = item.get("record_id")
+        title = item.get("title")
+        role = item.get("role", "main")
+        
+        # Determine target directory
+        if role == 'main': target_dir = main_dir
+        elif role == 'reference': target_dir = ref_dir
+        elif role == 'citation': target_dir = cited_dir
+        else: target_dir = main_dir # Default
+        
+        # Determine filename base
+        if doi:
+            base_name = _sanitize_dir_name(doi)
+        elif record_id:
+            base_name = _sanitize_dir_name(str(record_id))
+        elif title:
+             base_name = _sanitize_dir_name(title)
+        else:
+            continue
+
+        md_path = target_dir / f"{base_name}.md"
+        
+        if not md_path.exists():
+            tasks.append({
+                "doi": doi,
+                "record_id": record_id,
+                "target_dir": target_dir,
+                "role": role
+            })
+
+    if not tasks:
+        print("  No missing MD files found.")
+        return
+
+    print(f"  Found {len(tasks)} items with missing MD files. Retrying download...")
+    
+    def process_retry(task):
+        doi = task['doi']
+        rid = task['record_id']
+        tdir = task['target_dir']
+        role = task['role']
+        
+        try:
+            if doi:
+                if method == 'doi_source':
+                     process_one_by_doi_generic(client, doi, tdir, role=role, download=True)
+                else:
+                     process_one_by_doi(client, doi, tdir, download=True, years_window=years_window)
+            elif rid:
+                process_one_by_record_id_using_url(client, str(rid), tdir, download=True, years_window=years_window)
+            else:
+                pass
+        except Exception as e:
+            print(f"    Failed to retry {doi or rid}: {e}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers_related) as executor:
+        list(executor.map(process_retry, tasks))
 
 if __name__ == '__main__':
     main()
