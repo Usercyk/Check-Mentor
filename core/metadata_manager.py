@@ -11,6 +11,7 @@
 - 提供更准确的论文信息
 """
 import json
+import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from pathlib import Path
@@ -146,6 +147,16 @@ class PaperMetadata:
         return min(max(score, 0.0), 1.0)  # 限制在 [0, 1] 范围内
 
 
+def sanitize_filename(title: str) -> str:
+    """
+    Sanitize filename to match the downloader's behavior.
+    Replaces illegal characters with '_' and truncates to 150 chars.
+    """
+    sane_title = re.sub(r'[\\/:*?"<>|#&]', '_', title)
+    sane_title = (sane_title[:150] + '..') if len(sane_title) > 150 else sane_title
+    return sane_title
+
+
 class MetadataManager:
     """元数据管理器"""
     
@@ -189,7 +200,8 @@ class MetadataManager:
                         continue
                     
                     # 将title转换为有效的文件名
-                    filename = f"{title}.md"
+                    clean_title = sanitize_filename(title)
+                    filename = f"{clean_title}.md"
                     
                     metadata = PaperMetadata.from_dict(item)
                     self.metadata_cache[filename] = metadata

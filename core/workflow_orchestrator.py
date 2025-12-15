@@ -171,33 +171,6 @@ class WorkflowOrchestrator:
                 "md_filename": str(md_file),
             })
         return papers
-    
-    def _load_metadata_for_directory(self, dir_path: Path) -> bool:
-        """
-        为指定目录加载元数据文件（如果存在）
-        
-        元数据文件应命名为 'metadata.json' 或 'history.json' 并位于论文目录中
-        
-        Args:
-            dir_path: 论文目录路径
-            
-        Returns:
-            是否成功加载元数据
-        """
-        # 优先尝试 history.json（新格式）
-        history_file = dir_path / "history.json"
-        if history_file.exists():
-            print(f"    📋 发现元数据文件: {history_file.name}")
-            return self.metadata_manager.load_metadata_file(history_file)
-        
-        # 回退到 metadata.json（旧格式）
-        metadata_file = dir_path / "metadata.json"
-        if metadata_file.exists():
-            print(f"    📋 发现元数据文件: {metadata_file.name}")
-            return self.metadata_manager.load_metadata_file(metadata_file)
-        
-        print(f"    ℹ️  未找到元数据文件 (history.json 或 metadata.json)")
-        return False
 
     def run(self):
         """
@@ -209,8 +182,15 @@ class WorkflowOrchestrator:
         limit = config.TEST_MODE_PAPER_LIMIT if self.test_mode else 0
         base_data_path = self.data_root
         
-        # 尝试加载各个目录的元数据
+        # 尝试加载合并后的元数据文件
         print("\n🔍 检查并加载元数据文件...")
+        metadata_file = base_data_path / "metadata_items.json"
+        if metadata_file.exists():
+            print(f"  [Metadata] {metadata_file}")
+            self.metadata_manager.load_metadata_file(metadata_file)
+        else:
+            print(f"  ⚠️  未找到元数据文件: {metadata_file}")
+
         main_path = base_data_path / "main"
         ref1_path = base_data_path / "ref1"
         cited_path = base_data_path / "cited"
@@ -219,15 +199,6 @@ class WorkflowOrchestrator:
         if not cited_path.exists() and legacy_ref2_path.exists():
             print("  ⚠️  兼容模式：未找到 'cited' 目录，检测到旧目录 'ref2'，将临时使用 'ref2'。请尽快迁移数据到 'cited/'.")
             cited_path = legacy_ref2_path
-        
-        print(f"  [Main] {main_path}")
-        self._load_metadata_for_directory(main_path)
-        
-        print(f"  [Ref1] {ref1_path}")
-        self._load_metadata_for_directory(ref1_path)
-        
-        print(f"  [Cited] {cited_path}")
-        self._load_metadata_for_directory(cited_path)
         
         # 打印元数据统计
         if len(self.metadata_manager.metadata_cache) > 0:
