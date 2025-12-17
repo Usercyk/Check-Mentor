@@ -3,6 +3,7 @@ import json
 from typing import List, Dict, Any
 from pathlib import Path
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
@@ -16,7 +17,36 @@ class DepartmentAnalyzer:
         self.output_dir.mkdir(exist_ok=True)
 
     def _init_llm(self):
-        """Initialize LLM based on config."""
+        """Initialize LLM based on config. Prefer Gemini for this task if available."""
+        # 1. Try Gemini first (as requested for better synthesis)
+        if config.GEMINI_API_KEY:
+            print(f"  -> 🧠 Attempting to use Gemini ({config.GEMINI_MODEL}) for Department Analysis...")
+            try:
+                llm = None
+                if config.GEMINI_API_BASE:
+                     llm = ChatGoogleGenerativeAI(
+                        model=config.GEMINI_MODEL,
+                        google_api_key=config.GEMINI_API_KEY,
+                        temperature=config.LLM_TEMPERATURE,
+                        transport="rest",
+                        client_options={"api_endpoint": config.GEMINI_API_BASE},
+                        timeout=60
+                    )
+                else:
+                    llm = ChatGoogleGenerativeAI(
+                        model=config.GEMINI_MODEL,
+                        google_api_key=config.GEMINI_API_KEY,
+                        temperature=config.LLM_TEMPERATURE,
+                        transport="rest",
+                        timeout=60
+                    )
+                print(f"  -> ✅ Successfully initialized model: Gemini ({config.GEMINI_MODEL})")
+                return llm
+            except Exception as e:
+                print(f"  ⚠️ Failed to initialize Gemini: {e}. Falling back to default LLM.")
+
+        # 2. Fallback to OpenAI/Default
+        print(f"  -> 🔄 Using default LLM ({config.LLM_MODEL}) for Department Analysis.")
         if config.LLM_PROVIDER == "openai":
             return ChatOpenAI(
                 model=config.LLM_MODEL,
@@ -24,7 +54,7 @@ class DepartmentAnalyzer:
                 openai_api_key=config.OPENAI_API_KEY,
                 openai_api_base=config.OPENAI_API_BASE
             )
-        # Add other providers if needed, defaulting to OpenAI for now as per existing code patterns
+        # Default fallback
         return ChatOpenAI(
             model=config.LLM_MODEL,
             temperature=config.LLM_TEMPERATURE,

@@ -414,10 +414,19 @@ Example Output:
                     elif recency_score < 0.3:
                         weighted_score = weighted_score * 0.95
                 
+                # 应用来源加权：核心代表作（primary）获得额外提升
+                if paper.get('source_type') == 'primary':
+                    weighted_score = weighted_score * 1.10  # 10% boost for primary papers
+                
                 analysis_result["weighted_score"] = round(weighted_score, 2)
                 analysis_result["recency_score"] = recency_score  # 记录时效性得分
 
-                full_result = {**analysis_result, "paper_id": paper_id, "title": paper["title"]}
+                full_result = {
+                    **analysis_result, 
+                    "paper_id": paper_id, 
+                    "title": paper["title"],
+                    "source_type": paper.get('source_type', 'primary')
+                }
                 
                 rated_papers.append(full_result)
                 self.cache.set(paper_id, analysis_result)

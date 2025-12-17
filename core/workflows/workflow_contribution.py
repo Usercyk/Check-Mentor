@@ -221,12 +221,16 @@ Example Output:
                 "contribution_summary": "Could not generate a summary due to lack of valid data."
             }
 
-        # 按时效性得分排序（如果有的话），并构建分析文本
-        # 高得分（更新）的论文会被放在前面，在提示词中会被LLM优先考虑
-        def get_recency_score(analysis):
-            return analysis.get('recency_score', 0.5)
+        # 按优先级得分排序（时效性 + 来源权重）
+        # 高得分（更新 + 核心来源）的论文会被放在前面
+        def get_priority_score(analysis):
+            score = analysis.get('recency_score', 0.5)
+            # 核心来源（primary）给予额外加权，确保它们排在前面
+            if analysis.get('source_type') == 'primary':
+                score += 0.3 
+            return score
         
-        sorted_analyses = sorted(valid_analyses, key=get_recency_score, reverse=True)
+        sorted_analyses = sorted(valid_analyses, key=get_priority_score, reverse=True)
         
         # 如果论文过多，进行聚类和代表性采样
         if len(sorted_analyses) > 10:
@@ -235,18 +239,18 @@ Example Output:
             # 1. LLM语义聚类
             clusters = self._cluster_papers_by_llm(sorted_analyses)
             
-            # 2. 代表性提取：从每个主题中选择时效性最高的论文
+            # 2. 代表性提取：从每个主题中选择优先级最高的论文
             representative_papers = []
             paper_map = {p["title"]: p for p in sorted_analyses}
             
             for theme, titles in clusters.items():
                 if not titles: continue
                 
-                # 找到该主题下时效性得分最高的论文
+                # 找到该主题下优先级得分最高的论文
                 theme_papers = [paper_map[title] for title in titles if title in paper_map]
                 if not theme_papers: continue
                 
-                best_paper_in_theme = max(theme_papers, key=get_recency_score)
+                best_paper_in_theme = max(theme_papers, key=get_priority_score)
                 representative_papers.append(best_paper_in_theme)
             
             # 去重
@@ -256,10 +260,14 @@ Example Output:
         else:
             print(f"    -> Number of papers ({len(sorted_analyses)}) is manageable. Using all for synthesis.")
         
-        # 构建分析文本，包含时效性信息
+        # 构建分析文本，包含时效性和来源信息
         analysis_parts = []
         for i, analysis in enumerate(sorted_analyses):
             paper_text = f"Paper {i+1}:\n- Research Area: {analysis.get('research_area', 'N/A')}\n- Core Contribution: {analysis.get('core_contribution', 'N/A')}"
+            
+            # 来源标记
+            if analysis.get('source_type') == 'primary':
+                paper_text += f"\n- **Status: CORE REPRESENTATIVE WORK** (High Priority - This is a key paper)"
             
             # 如果有时效性信息，添加权重提示
             recency_score = analysis.get('recency_score')
@@ -286,7 +294,9 @@ Example Output:
 2.  **NO HYPE / NO FLUFF:** Strictly avoid exaggerated adjectives like "revolutionary," "unprecedented," or "miraculous." Do not sound like a marketing brochure. Be objective. Instead of saying "He made a groundbreaking discovery," say "He demonstrated [X] for the first time" or "He proposed a method to solve [Y]."
 3.  **Clarity over Jargon:** Explain *why* something is done before saying *what* was done.
 
-**IMPORTANT - Temporal Weighting**: The papers are listed with recency weights. Focus the narrative on "HIGH" or "MEDIUM-HIGH" recency papers to reflect current interests. Use older papers only for context.
+**IMPORTANT - Weighting Instructions**: 
+- **CORE REPRESENTATIVE WORK**: Papers marked with this status are the professor's most important contributions (e.g., PRD, PRL papers). You MUST prioritize these papers in your summary. Ensure their contributions are highlighted prominently.
+- **Recency Weight**: Focus the narrative on "HIGH" or "MEDIUM-HIGH" recency papers to reflect current interests. Use older papers only for context.
 
 **Key Instructions:**
 
@@ -429,7 +439,8 @@ You MUST provide a JSON response with a `research_directions` key (a list of str
                 single_analysis = {
                     **analysis_result,
                     'paper_id': paper_id,
-                    'title': paper['title']
+                    'title': paper['title'],
+                    'source_type': paper.get('source_type', 'primary')
                 }
                 
                 # 如果论文有时效性得分，也包含进去

@@ -448,6 +448,11 @@ Synthesized Summary of Project Suggestions:""")
                     elif recency_score < 0.4:
                         weighted_score = weighted_score * 0.95  # 5%降权
 
+                # 应用来源加权：核心代表作（primary）获得轻微提升
+                # 核心代表作通常质量更高，适合作为项目起点，但也要考虑难度
+                if paper.get('source_type') == 'primary':
+                    weighted_score = weighted_score * 1.05  # 5% boost
+
                 # 构建完整的评估对象并缓存
                 evaluation = {
                     **evaluation_result,

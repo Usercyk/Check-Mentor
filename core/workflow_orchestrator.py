@@ -150,12 +150,12 @@ class WorkflowOrchestrator:
         elif level == 2:
             print(f"\n--- {title} ---")
 
-    def _load_papers_from_dir(self, dir_path: str, author: str, limit: int = 0) -> List[Dict[str, Any]]:
+    def _load_papers_from_dir(self, dir_path: str, author: str, limit: int = 0, source_type: str = "primary") -> List[Dict[str, Any]]:
         """从指定目录加载所有论文的元数据。"""
         papers = []
         full_path = Path(dir_path)
         if not full_path.is_dir():
-            print(f"    ⚠️ Directory does not exist, skipping: {full_path}")
+            # print(f"    ⚠️ Directory does not exist, skipping: {full_path}")
             return papers
 
         md_files = sorted(list(full_path.glob("*.md")))
@@ -169,6 +169,7 @@ class WorkflowOrchestrator:
                 "title": md_file.stem,
                 "authors": [author],
                 "md_filename": str(md_file),
+                "source_type": source_type,  # Add source type tag
             })
         return papers
 
@@ -180,36 +181,71 @@ class WorkflowOrchestrator:
         self._print_section_header("任务一：准备和分离论文数据源", level=2)
         
         limit = config.TEST_MODE_PAPER_LIMIT if self.test_mode else 0
-        base_data_path = self.data_root
         
-        # 尝试加载合并后的元数据文件
+        # 定义主数据路径和副数据路径
+        primary_data_path = self.data_root
+        secondary_data_path = Path(str(self.data_root) + "+")
+        
+        # 1. 加载元数据
         print("\n🔍 检查并加载元数据文件...")
-        metadata_file = base_data_path / "metadata_items.json"
-        if metadata_file.exists():
-            print(f"  [Metadata] {metadata_file}")
-            self.metadata_manager.load_metadata_file(metadata_file)
+        
+        # 加载主文件夹元数据
+        metadata_file_primary = primary_data_path / "metadata_items.json"
+        if metadata_file_primary.exists():
+            print(f"  [Metadata Primary] {metadata_file_primary}")
+            self.metadata_manager.load_metadata_file(metadata_file_primary)
         else:
-            print(f"  ⚠️  未找到元数据文件: {metadata_file}")
-
-        main_path = base_data_path / "main"
-        ref1_path = base_data_path / "ref1"
-        cited_path = base_data_path / "cited"
-        # 向后兼容：若新目录不存在但旧目录存在，则回退到旧目录
-        legacy_ref2_path = base_data_path / "ref2"
-        if not cited_path.exists() and legacy_ref2_path.exists():
-            print("  ⚠️  兼容模式：未找到 'cited' 目录，检测到旧目录 'ref2'，将临时使用 'ref2'。请尽快迁移数据到 'cited/'.")
-            cited_path = legacy_ref2_path
+            print(f"  ⚠️  未找到主元数据文件: {metadata_file_primary}")
+            
+        # 加载副文件夹元数据（如果存在）
+        if secondary_data_path.exists():
+            metadata_file_secondary = secondary_data_path / "metadata_items.json"
+            if metadata_file_secondary.exists():
+                print(f"  [Metadata Secondary] {metadata_file_secondary}")
+                self.metadata_manager.load_metadata_file(metadata_file_secondary)
         
         # 打印元数据统计
         if len(self.metadata_manager.metadata_cache) > 0:
             self.metadata_manager.print_statistics()
         else:
             print("    ℹ️  未加载任何元数据，将使用默认配置")
+            
+        # 2. 加载论文数据
+        def load_papers_from_root(root_path: Path, source_type: str):
+            """Helper to load papers from a specific root path."""
+            if not root_path.exists():
+                return [], [], []
+                
+            p_main_path = root_path / "main"
+            p_ref1_path = root_path / "ref1"
+            p_cited_path = root_path / "cited"
+            
+            # 兼容性检查
+            legacy_ref2_path = root_path / "ref2"
+            if not p_cited_path.exists() and legacy_ref2_path.exists():
+                if source_type == "primary": # 只在主文件夹报兼容性警告，避免重复
+                    print("  ⚠️  兼容模式：未找到 'cited' 目录，检测到旧目录 'ref2'，将临时使用 'ref2'。")
+                p_cited_path = legacy_ref2_path
+            
+            p_main = self._load_papers_from_dir(str(p_main_path), self.professor_name, source_type=source_type)
+            p_ref1 = self._load_papers_from_dir(str(p_ref1_path), "Various Authors", source_type=source_type)
+            p_cited = self._load_papers_from_dir(str(p_cited_path), "Various Authors", source_type=source_type)
+            
+            return p_main, p_ref1, p_cited
+
+        # 加载主文件夹论文
+        main_p, ref1_p, cited_p = load_papers_from_root(primary_data_path, "primary")
         
-        # 加载论文 - 加载阶段不做截断，统一由后续“已按时序排序”的阶段按规则截断
-        main_papers = self._load_papers_from_dir(str(main_path), self.professor_name)
-        ref1_papers = self._load_papers_from_dir(str(ref1_path), "Various Authors")
-        cited_papers = self._load_papers_from_dir(str(cited_path), "Various Authors")
+        # 加载副文件夹论文
+        main_s, ref1_s, cited_s = load_papers_from_root(secondary_data_path, "secondary")
+        if secondary_data_path.exists():
+            print(f"  -> Detected secondary data folder: {secondary_data_path}")
+            print(f"     Loaded {len(main_s)} main, {len(ref1_s)} ref1, {len(cited_s)} cited papers from secondary source.")
+        
+        # 合并论文列表
+        main_papers = main_p + main_s
+        ref1_papers = ref1_p + ref1_s
+        cited_papers = cited_p + cited_s
         
         # 为论文添加元数据信息
         print("\n📝 为论文添加元数据...")
