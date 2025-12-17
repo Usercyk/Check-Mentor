@@ -38,45 +38,43 @@ def analyze_progress(data_dir: Path):
             continue
             
         meta_path = teacher_dir / "metadata_items.json"
-        if not meta_path.exists():
-            continue
+        
+        items = []
+        if meta_path.exists():
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                items = data.get("items", [])
+            except Exception as e:
+                print(f"处理 {teacher_dir.name} 时出错: {e}")
             
-        try:
-            with open(meta_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                
-            items = data.get("items", [])
-            total = len(items)
-            if total == 0:
-                continue
-                
-            have_md = sum(1 for i in items if i.get("have_md") is True)
+        total = len(items)
+        # if total == 0: continue # Show all teachers even if 0 items
             
-            # 按角色统计
-            main_total = sum(1 for i in items if i.get("role") == "main")
-            main_md = sum(1 for i in items if i.get("role") == "main" and i.get("have_md") is True)
-            
-            ref_total = sum(1 for i in items if i.get("role") == "reference")
-            ref_md = sum(1 for i in items if i.get("role") == "reference" and i.get("have_md") is True)
-            
-            cited_total = sum(1 for i in items if i.get("role") == "citation")
-            cited_md = sum(1 for i in items if i.get("role") == "citation" and i.get("have_md") is True)
-            
-            stats.append({
-                "Teacher": teacher_dir.name,
-                "Total Items": total,
-                "Total MD": have_md,
-                "Completion %": (have_md / total * 100) if total > 0 else 0.0,
-                "Main Total": main_total,
-                "Main MD": main_md,
-                "Ref Total": ref_total,
-                "Ref MD": ref_md,
-                "Cited Total": cited_total,
-                "Cited MD": cited_md
-            })
-            
-        except Exception as e:
-            print(f"处理 {teacher_dir.name} 时出错: {e}")
+        have_md = sum(1 for i in items if i.get("have_md") is True)
+        
+        # 按角色统计
+        main_total = sum(1 for i in items if i.get("role") == "main")
+        main_md = sum(1 for i in items if i.get("role") == "main" and i.get("have_md") is True)
+        
+        ref_total = sum(1 for i in items if i.get("role") == "reference")
+        ref_md = sum(1 for i in items if i.get("role") == "reference" and i.get("have_md") is True)
+        
+        cited_total = sum(1 for i in items if i.get("role") == "citation")
+        cited_md = sum(1 for i in items if i.get("role") == "citation" and i.get("have_md") is True)
+        
+        stats.append({
+            "Teacher": teacher_dir.name,
+            "Total Items": total,
+            "Total MD": have_md,
+            "Completion %": (have_md / total * 100) if total > 0 else 0.0,
+            "Main Total": main_total,
+            "Main MD": main_md,
+            "Ref Total": ref_total,
+            "Ref MD": ref_md,
+            "Cited Total": cited_total,
+            "Cited MD": cited_md
+        })
             
     return stats
 
@@ -194,7 +192,10 @@ def generate_chart(stats, output_file):
     plt.rcParams['axes.unicode_minus'] = False
     
     # 设置图表大小
-    plt.figure(figsize=(24, 12))
+    # 动态计算高度：每位老师 0.5 英寸，最小 12 英寸
+    height_per_teacher = 0.5
+    fig_height = max(12, len(df) * height_per_teacher)
+    plt.figure(figsize=(20, fig_height))
     
     # 使用分段线性缩放 (Piecewise Linear Scaling)
     # 0-200: 线性 (1:1) - 重点展示区域
@@ -209,62 +210,65 @@ def generate_chart(stats, output_file):
         return np.where(x < threshold, x, threshold + (x - threshold) / compression)
 
     try:
-        plt.yscale('function', functions=(forward, inverse))
-        # 手动设置 Y 轴刻度以显示压缩效果
+        plt.xscale('function', functions=(forward, inverse))
+        # 手动设置 X 轴刻度以显示压缩效果
         major_ticks = [0, 50, 100, 150, 200, 300, 400, 500, 750, 1000]
-        plt.yticks(major_ticks)
+        plt.xticks(major_ticks)
     except Exception as e:
         print(f"设置自定义缩放失败，回退到对数刻度: {e}")
-        plt.yscale('symlog')
+        plt.xscale('symlog')
 
-    plt.grid(True, axis='y', which='major', linestyle='--', alpha=0.3)
+    plt.grid(True, axis='x', which='major', linestyle='--', alpha=0.3)
     
-    x = list(range(len(df)))
+    y = list(range(len(df)))
     
-    # 调整柱状图宽度
-    width_total = 0.85
-    width_sub = 0.35
+    # 调整柱状图高度 (Horizontal Bar Chart)
+    height_total = 0.85
+    height_sub = 0.35
     
-    # 绘制柱状图
+    # 绘制水平柱状图 (barh)
     # Total Items (Base) - 背景宽柱
-    plt.bar(x, df["Base Total Items"], width_total, label='基础条目 (Base Items)', color='#f5f5f5', edgecolor='#bdbdbd')
+    plt.barh(y, df["Base Total Items"], height=height_total, label='基础条目 (Base Items)', color='#f5f5f5', edgecolor='#bdbdbd')
     # Total Items (Plus) - Stacked on Base
-    plt.bar(x, df["Plus Total Items"], width_total, bottom=df["Base Total Items"], label='增补条目 (Plus Items)', color='#e0e0e0', edgecolor='#bdbdbd')
+    plt.barh(y, df["Plus Total Items"], height=height_total, left=df["Base Total Items"], label='增补条目 (Plus Items)', color='#e0e0e0', edgecolor='#bdbdbd')
     
-    # Main Total (Left) - 左侧中柱
-    x_left = [i - 0.2 for i in x]
-    plt.bar(x_left, df["Base Main Total"], width_sub, label='基础原文 (Base Main)', color='#90caf9', edgecolor='#1976D2', alpha=0.9)
-    plt.bar(x_left, df["Plus Main Total"], width_sub, bottom=df["Base Main Total"], label='增补原文 (Plus Main)', color='#f48fb1', edgecolor='#C2185B', alpha=0.9)
+    # Main Total (Upper) - 上方中柱
+    y_upper = [i + 0.2 for i in y]
+    plt.barh(y_upper, df["Base Main Total"], height=height_sub, label='基础原文 (Base Main)', color='#90caf9', edgecolor='#1976D2', alpha=0.9)
+    plt.barh(y_upper, df["Plus Main Total"], height=height_sub, left=df["Base Main Total"], label='增补原文 (Plus Main)', color='#f48fb1', edgecolor='#C2185B', alpha=0.9)
 
-    # Total MD (Right) - 右侧中柱
-    x_right = [i + 0.2 for i in x]
-    plt.bar(x_right, df["Base Total MD"], width_sub, label='基础已转 (Base MD)', color='#a5d6a7', edgecolor='#2e7d32', alpha=0.9)
-    plt.bar(x_right, df["Plus Total MD"], width_sub, bottom=df["Base Total MD"], label='增补已转 (Plus MD)', color='#ffcc80', edgecolor='#ef6c00', alpha=0.9)
+    # Total MD (Lower) - 下方中柱
+    y_lower = [i - 0.2 for i in y]
+    plt.barh(y_lower, df["Base Total MD"], height=height_sub, label='基础已转 (Base MD)', color='#a5d6a7', edgecolor='#2e7d32', alpha=0.9)
+    plt.barh(y_lower, df["Plus Total MD"], height=height_sub, left=df["Base Total MD"], label='增补已转 (Plus MD)', color='#ffcc80', edgecolor='#ef6c00', alpha=0.9)
     
     # 添加标题和标签
-    plt.ylabel('文章数量 (Count)', fontsize=14)
+    plt.xlabel('文章数量 (Count)', fontsize=14)
     plt.title('各老师文献处理进度 (Project Progress by Teacher)', fontsize=18)
-    plt.xticks(x, df["Teacher"], rotation=90, ha='center', fontsize=10) # 旋转90度以适应更多标签
-    plt.legend(fontsize=12, loc='upper right')
+    plt.yticks(y, df["Teacher"], fontsize=10) # 默认水平显示
+    plt.legend(fontsize=12, loc='lower right')
+    
+    # 反转 Y 轴，使第一项在顶部
+    plt.gca().invert_yaxis()
     
     # 在柱子上添加数值标签
-    # 总数标签 (Total Items) - 放在宽柱顶部
+    # 总数标签 (Total Items) - 放在宽柱右侧
     for i, (base, plus) in enumerate(zip(df["Base Total Items"], df["Plus Total Items"])):
         total = base + plus
         if total > 0:
-            plt.text(i, total * 1.1, str(total), ha='center', va='bottom', fontsize=8, color='grey')
+            plt.text(total * 1.02, i, str(total), va='center', ha='left', fontsize=8, color='grey')
         
-    # 原文标签 (Main Total) - 放在左侧柱子
+    # 原文标签 (Main Total) - 放在上方柱子
     for i, (base, plus) in enumerate(zip(df["Base Main Total"], df["Plus Main Total"])):
         total = base + plus
         if total > 0:
-            plt.text(i - 0.2, total, str(total), ha='center', va='bottom', fontsize=8, color='#0d47a1', fontweight='bold')
+            plt.text(total, i + 0.2, str(total), va='center', ha='left', fontsize=8, color='#0d47a1', fontweight='bold')
 
-    # 已完成标签 (Total MD) - 放在右侧柱子
+    # 已完成标签 (Total MD) - 放在下方柱子
     for i, (base, plus) in enumerate(zip(df["Base Total MD"], df["Plus Total MD"])):
         total = base + plus
         if total > 0:
-            plt.text(i + 0.2, total, str(total), ha='center', va='bottom', fontsize=8, color='#1b5e20', fontweight='bold')
+            plt.text(total, i - 0.2, str(total), va='center', ha='left', fontsize=8, color='#1b5e20', fontweight='bold')
 
     plt.tight_layout()
     

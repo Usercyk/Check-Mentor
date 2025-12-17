@@ -20,6 +20,10 @@ from typing import Dict, List, Optional, Any, Tuple
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ==========================================
 # 1. Configuration & Utils
@@ -406,10 +410,14 @@ class InspireHEPClient:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
     
-    def _request(self, url: str, params: Optional[Dict] = None, stream: bool = False) -> requests.Response:
+    def _request(self, url: str, params: Optional[Dict] = None, stream: bool = False, **kwargs) -> requests.Response:
         # Random sleep to distribute requests and avoid hitting rate limits
-        time.sleep(random.uniform(0.5, 1.5))
-        response = self.session.get(url, params=params, timeout=self.timeout, stream=stream)
+        if "arxiv.org" in url:
+            time.sleep(random.uniform(3.0, 5.0))
+        else:
+            time.sleep(random.uniform(0.5, 1.5))
+            
+        response = self.session.get(url, params=params, timeout=self.timeout, stream=stream, **kwargs)
         response.raise_for_status()
         return response
 
@@ -456,7 +464,14 @@ class InspireHEPClient:
         }
     
     def download_file(self, url: str, output_path: str) -> None:
-        response = self._request(url, stream=True)
+        kwargs = {}
+        if "arxiv.org" in url:
+            url = url.replace("https://arxiv.org/", "https://export.arxiv.org/")
+            kwargs["headers"] = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
+        response = self._request(url, stream=True, **kwargs)
         with open(output_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk: f.write(chunk)
@@ -589,11 +604,20 @@ def fetch_related_ids(client: InspireHEPClient, record_id: str, kind: str, limit
 
 def _pdf_url_from_inspire_metadata_raw(md_raw: Dict[str, Any]) -> Optional[str]:
     docs = md_raw.get("documents", []) or []
+    
+    # Priority 1: Explicit fulltext
+    for doc in docs:
+        if doc.get("fulltext") is True:
+            url = doc.get("url") or doc.get("source")
+            if url: return url
+
+    # Priority 2: Any PDF file
     for doc in docs:
         key = (doc.get("key") or "").lower()
         url = doc.get("url") or doc.get("source")
         if key.endswith(".pdf") and url: return url
         if url and str(url).lower().endswith('.pdf'): return url
+        
     eprints = md_raw.get("arxiv_eprints", []) or []
     if eprints:
         arxiv_id = eprints[0].get("value")
@@ -962,10 +986,120 @@ def convert_pdfs_to_md(teacher: str, pdf_root: Path, md_root: Path, token: str):
         print(f"Batch ID: {batch_id}")
         batch_retrieve(batch_id, uniques, file_dir, output_dir, header)
         _replicate_duplicates(duplicates_map, output_dir)
+        
+        # Cleanup PDFs that have been successfully converted
+        print("  Cleaning up converted PDFs...")
+        for pdf_name in uniques.keys():
+            pdf_path = file_dir / pdf_name
+            # Check if MD exists (simple check based on name)
+            # Note: batch_retrieve saves as .md, but might be in subfolders if we passed relative paths?
+            # _gather_candidates_and_duplicates uses rglob, so keys in uniques are relative paths or names.
+            # Let's assume if batch_retrieve succeeded, we can delete.
+            # Or better, check if corresponding MD exists.
+            
+            # uniques keys are relative paths from file_dir (as strings) or filenames?
+            # In _gather_candidates_and_duplicates: uniques[rel_path] = file_id (initially None)
+            
+            # Construct expected MD path
+            # If pdf is "main/paper.pdf", md should be "main/paper.md"
+            rel_path = Path(pdf_name)
+            md_path = output_dir / rel_path.with_suffix('.md')
+            
+            if md_path.exists():
+                try:
+                    if pdf_path.exists():
+                        pdf_path.unlink()
+                    
+                    # Delete corresponding metadata json
+                    meta_json = pdf_path.with_name(f"{pdf_path.stem}_metadata.json")
+                    if meta_json.exists():
+                        meta_json.unlink()
+
+                except Exception as e:
+                    print(f"    Failed to delete source files for {pdf_path.name}: {e}")
+            
+        # Also cleanup duplicates if their primary MD exists
+        for dup_name, pri_name in duplicates_map.items():
+             pri_md_path = output_dir / Path(pri_name).with_suffix('.md')
+             if pri_md_path.exists():
+                 dup_pdf_path = file_dir / dup_name
+                 if dup_pdf_path.exists():
+                     try:
+                         dup_pdf_path.unlink()
+                         
+                         # Delete corresponding metadata json for duplicate
+                         dup_meta = dup_pdf_path.with_name(f"{dup_pdf_path.stem}_metadata.json")
+                         if dup_meta.exists():
+                             dup_meta.unlink()
+                     except Exception: pass
 
 # ==========================================
 # 5. Main Logic
 # ==========================================
+
+def safe_cleanup_converted_files(teacher_dir: Path):
+    """
+    Safely delete PDF, ZIP, and JSON files only if the corresponding MD file exists.
+    """
+    print(f"  Safe cleanup for {teacher_dir.name}...")
+    for subdir_name in ['main', 'ref1', 'cited']:
+        subdir = teacher_dir / subdir_name
+        if not subdir.exists(): continue
+        
+        # Gather all candidate files by stem
+        candidates = defaultdict(list)
+        for p in subdir.iterdir():
+            if not p.is_file(): continue
+            if p.suffix.lower() in ['.pdf', '.zip', '.json']:
+                # Identify stem
+                if p.name.endswith('_metadata.json'):
+                    stem = p.name[:-14]
+                else:
+                    stem = p.stem
+                candidates[stem].append(p)
+        
+        for stem, files in candidates.items():
+            # Check if MD exists with this stem
+            md_path = subdir / f"{stem}.md"
+            should_delete = False
+            
+            if md_path.exists():
+                should_delete = True
+            else:
+                # Check for title-based MD using metadata
+                meta_json = next((f for f in files if f.name.endswith('_metadata.json')), None)
+                
+                if meta_json:
+                    try:
+                        with open(meta_json, 'r', encoding='utf-8') as f:
+                            meta = json.load(f)
+                            title = meta.get('title')
+                            if title:
+                                sanitized_title = _sanitize_dir_name(title)
+                                if len(sanitized_title) > 150:
+                                    sanitized_title = sanitized_title[:150]
+                                
+                                title_md_path = subdir / f"{sanitized_title}.md"
+                                if title_md_path.exists():
+                                    should_delete = True
+                    except Exception:
+                        pass
+            
+            if should_delete:
+                for p in files:
+                    try:
+                        if p.exists():
+                            p.unlink()
+                    except Exception as e:
+                        print(f"    Failed to delete {p.name}: {e}")
+
+        # Unconditionally delete 'images' folder
+        images_dir = subdir / 'images'
+        if images_dir.exists() and images_dir.is_dir():
+            try:
+                shutil.rmtree(images_dir)
+            except Exception as e:
+                print(f"    Failed to delete images folder in {subdir_name}: {e}")
 
 def cleanup_intermediate_files(teacher_dir: Path):
     """
@@ -1314,6 +1448,7 @@ def main():
     parser.add_argument('--force', action='store_true', help='Force re-process even if already processed. Will reset progress for the target teacher(s).')
     parser.add_argument('--method', choices=['inspire', 'doi_source'], default='inspire', help='Download method to use')
     parser.add_argument('--retry', action='store_true', help='Retry downloading items present in metadata but missing MD files')
+    parser.add_argument('--convert-only', action='store_true', help='Only convert existing PDFs to MD, skip download')
     args = parser.parse_args()
 
     if args.method == 'doi_source':
@@ -1339,6 +1474,35 @@ def main():
     workers_main, workers_related = get_worker_cfg(config)
     limit_ref, limit_cited = get_limit_cfg(config)
     
+    data_root = PROJ_ROOT / 'data'
+
+    if args.convert_only:
+        if not args.token:
+            print("Error: MINERU_TOKEN is required for conversion.")
+            return
+            
+        teachers_to_process = []
+        if args.teacher:
+            teachers_to_process = [args.teacher]
+        else:
+            # Scan data directory
+            if data_root.exists():
+                teachers_to_process = [d.name for d in data_root.iterdir() if d.is_dir()]
+            else:
+                print(f"Data directory not found: {data_root}")
+                return
+            
+        for teacher in teachers_to_process:
+            print(f"\n[Convert Only] Processing Teacher: {teacher}")
+            teacher_dir = data_root / teacher
+            if not teacher_dir.exists():
+                print(f"  Directory not found: {teacher_dir}")
+                continue
+                
+            convert_pdfs_to_md(teacher, data_root, data_root, args.token)
+            safe_cleanup_converted_files(teacher_dir)
+        return
+
     papers_data = parse_papers_data(Path(args.papers_data))
     
     if args.teacher:
@@ -1350,7 +1514,7 @@ def main():
 
     processed_records = load_progress()
     
-    data_root = PROJ_ROOT / 'data'
+    # data_root is already defined above
     
     for teacher, dois in papers_data.items():
         print(f"\nProcessing Teacher: {teacher}")
