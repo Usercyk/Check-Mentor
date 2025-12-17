@@ -14,20 +14,61 @@ def _run_py(script: Path, argv: list[str]) -> int:
 def cmd_analyze(ns: argparse.Namespace) -> int:
     # 延迟导入，避免未安装依赖时 -h 失败
     from core.workflow_orchestrator import WorkflowOrchestrator
+    from core.department_analysis import DepartmentAnalyzer
+    
     target = ns.target
     data_root = ns.data_root
-    # 若未指定 data_root，优先使用 Downloads_md/<target>，否则回退到 data/<target>
-    if not data_root:
-        repo = Path(__file__).resolve().parent
-        dl_md = repo / 'Downloads_md' / target
-        data_root = str(dl_md) if dl_md.exists() else None
+    list_file = ns.list_file
 
-    orchestrator = WorkflowOrchestrator(
-        professor_name=target,
-        test_mode=ns.test_mode,
-        data_root=data_root,
-    )
-    orchestrator.run()
+    if list_file:
+        # --- 批量/系所模式 ---
+        print(f"\n🚀 Starting Department Analysis for: {target}")
+        print(f"📋 Reading professor list from: {list_file}")
+        
+        analyzer = DepartmentAnalyzer()
+        try:
+            professors = analyzer.load_professors(list_file)
+        except Exception as e:
+            print(f"❌ Error loading list file: {e}")
+            return 1
+            
+        print(f"👥 Found {len(professors)} professors.")
+        
+        # 1. 批量运行个人分析
+        for i, prof_name in enumerate(professors, 1):
+            print(f"\n[{i}/{len(professors)}] Analyzing professor: {prof_name} ...")
+            try:
+                # 批量模式下默认使用 data/<name> 结构，暂不通过 data_root 覆盖
+                orchestrator = WorkflowOrchestrator(
+                    professor_name=prof_name,
+                    test_mode=ns.test_mode,
+                    data_root=None 
+                )
+                orchestrator.run()
+            except Exception as e:
+                print(f"❌ Error analyzing {prof_name}: {e}")
+                # 继续处理下一个
+        
+        # 2. 运行系所画像生成
+        print(f"\n[Department Analysis] Generating portrait for {target}...")
+        output_filename = f"{target}_portrait.md"
+        analyzer.run(list_file, output_file=output_filename, test_mode=ns.test_mode, department_name=target)
+        print(f"✨ All done! Department portrait: output/{output_filename}")
+        
+    else:
+        # --- 单人模式 ---
+        # 若未指定 data_root，优先使用 Downloads_md/<target>，否则回退到 data/<target>
+        if not data_root:
+            repo = Path(__file__).resolve().parent
+            dl_md = repo / 'Downloads_md' / target
+            data_root = str(dl_md) if dl_md.exists() else None
+
+        orchestrator = WorkflowOrchestrator(
+            professor_name=target,
+            test_mode=ns.test_mode,
+            data_root=data_root,
+        )
+        orchestrator.run()
     return 0
 
 
@@ -125,7 +166,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # analyze
     pa = sub.add_parser('analyze', help='运行分析工作流，生成最终报告')
-    pa.add_argument('--target', required=True, help='要分析的目标教授姓名')
+    pa.add_argument('--target', required=True, help='要分析的目标教授姓名（或系所名称，若指定了 --list-file）')
+    pa.add_argument('--list-file', default=None, help='教授名单文件路径（如 data/finish_mentor.txt）。若指定此项，将批量分析名单中的教授并生成系所画像。')
     pa.add_argument('--test-mode', action='store_true', help='测试模式，仅处理少量数据')
     pa.add_argument('--data-root', default=None, help='数据根目录（包含 main/ref1/ref2 的目录）；默认优先使用 Downloads_md/<target>')
     pa.set_defaults(func=cmd_analyze)
