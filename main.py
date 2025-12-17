@@ -1,9 +1,83 @@
 import argparse
 import sys
 import subprocess
+import datetime
+import os
 from pathlib import Path
 
+# --- Logging Setup ---
+def setup_error_logging():
+    """Sets up a log file for the current execution session."""
+    log_dir = "execution_logs"
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"error_log_{timestamp}.txt")
+    
+    with open(log_file, "w", encoding="utf-8") as f:
+        f.write(f"Run Time: {datetime.datetime.now()}\n")
+        f.write(f"Command: {' '.join(sys.argv)}\n")
+        f.write("-" * 50 + "\n")
+    
+    return log_file
 
+class StreamInterceptor:
+    """
+    Intercepts writes to a stream (stdout/stderr).
+    Writes to the original stream.
+    Also writes to a log file if the message contains error keywords.
+    """
+    def __init__(self, original_stream, log_file):
+        self.original_stream = original_stream
+        self.log_file = log_file
+        # Keywords to trigger logging (case-insensitive)
+        self.error_keywords = [
+            "error", "exception", "traceback", "fail", "fatal", 
+            "❌", "⚠️", "🔴", "quota", "401", "403", "500"
+        ]
+
+    def write(self, message):
+        # 1. Write to original stream (so user sees it)
+        self.original_stream.write(message)
+        
+        # 2. Check if we should log this message
+        if not self.log_file:
+            return
+            
+        # Simple filter: ignore pure whitespace
+        if not message.strip():
+            return
+
+        # Check keywords
+        msg_lower = message.lower()
+        if any(k in msg_lower for k in self.error_keywords):
+            try:
+                # Append to log file
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    # Add a timestamp for context
+                    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                    # We strip the message to avoid double newlines, then add one back
+                    f.write(f"[{timestamp}] {message.strip()}\n")
+            except Exception:
+                pass # Safety first
+
+    def flush(self):
+        self.original_stream.flush()
+        
+    def __getattr__(self, name):
+        """Delegate attribute access to the original stream (e.g. isatty, encoding)."""
+        return getattr(self.original_stream, name)
+
+# Global log file path
+CURRENT_LOG_FILE = None
+
+def log_error(log_file, message):
+    """Logs an error message to the file."""
+    if log_file:
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {message}\n")
+        except Exception:
+            pass # Fail silently if logging fails
 
 def _run_py(script: Path, argv: list[str]) -> int:
     cmd = [sys.executable, str(script), *argv]
@@ -215,9 +289,37 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
-    parser = build_parser()
-    ns = parser.parse_args()
-    return ns.func(ns)
+    global CURRENT_LOG_FILE
+    CURRENT_LOG_FILE = setup_error_logging()
+    
+    # Redirect stdout and stderr to capture all error prints
+    sys.stdout = StreamInterceptor(sys.stdout, CURRENT_LOG_FILE)
+    sys.stderr = StreamInterceptor(sys.stderr, CURRENT_LOG_FILE)
+    
+    try:
+        parser = build_parser()
+        ns = parser.parse_args()
+        return ns.func(ns)
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully and log it
+        msg = "⛔ User interrupted execution (KeyboardInterrupt)."
+        print(f"\n{msg}")
+        log_error(CURRENT_LOG_FILE, msg)
+        return 130
+    except Exception as e:
+        # Catch-all for unhandled exceptions
+        msg = f"🔥 Unhandled exception: {e}"
+        print(f"\n{msg}")
+        log_error(CURRENT_LOG_FILE, msg)
+        # Also log the full traceback
+        import traceback
+        try:
+            with open(CURRENT_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write("\n--- Full Traceback ---\n")
+                traceback.print_exc(file=f)
+        except:
+            pass
+        return 1
 
 if __name__ == "__main__":
     main()

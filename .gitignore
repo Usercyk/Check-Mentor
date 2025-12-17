@@ -42,6 +42,7 @@ test/
 pip-log.txt
 pip-delete-this-directory.txt
 log/
+*logs/
 
 # Unit test / coverage reports
 htmlcov/
