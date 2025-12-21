@@ -39,8 +39,20 @@ retry_strategy = Retry(
 adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("http://", adapter)
 session.mount("https://", adapter)
+
 DEFAULT_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
 }
 
 # Default networking knobs (overridable via CLI)
@@ -74,7 +86,13 @@ class RateLimiter:
             now = time.monotonic()
             elapsed = now - self.last
             if elapsed < self.interval:
-                time.sleep(self.interval - elapsed)
+                # Add random jitter to avoid being detected as a bot
+                jitter = random.uniform(0.1, 0.5)
+                time.sleep(self.interval - elapsed + jitter)
+                now = time.monotonic()
+            else:
+                # Even if we don't need to wait, add a tiny random sleep
+                time.sleep(random.uniform(0.05, 0.2))
                 now = time.monotonic()
             self.last = now
 
@@ -427,6 +445,22 @@ def GetTitleFromDOI(DOI):
 
     # Helper: fetch via Sci-Hub
     def _try_scihub():
+        try:
+            sci_hub_url = f"https://sci-hub.se/{DOI}"
+            response = http_get(sci_hub_url, headers=headers, timeout=REQUEST_TIMEOUT)
+            if not production_mode:
+                print("Sci-Hub URL Status Code:", response.status_code)
+            if response.status_code == 200:
+                references = ExtractReferences(response.text)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                title_tag = soup.find('title')
+                if not production_mode:
+                    print("Extracted Title Tag from Sci-Hub:", title_tag)
+                if title_tag and title_tag.text:
+                    return title_tag.text.strip(), references
+        except Exception as e:
+            if not production_mode:
+                print(f"Error fetching title from Sci-Hub: {e}")
         return None
 
     # Execution order
@@ -629,11 +663,55 @@ def get_pdf_from_publisher(doi):
 
 # function: Download English-paper by DOI
 def GetDownloadUrl(doi, scihub_domains: list[str] | None = None):
-    # This method is intentionally left empty to comply with copyright regulations.
-    # Please use legitimate sources or institutional access to download papers.
-    return None
+    base_urls = scihub_domains or SCIHUB_DOMAINS or [
+        "https://sci-hub.se",
+        "https://sci-hub.st",
+        "https://sci-hub.ru",
+        "https://sci-hub.wf",
+        "https://sci-hub.ee",
+    ]
+    for base_url in base_urls:
+        url = f"{base_url}/{doi}"
+        try:
+            if not production_mode:
+                print(f"Trying URL: {url}")
+            r = http_get(url, timeout=10, headers=DEFAULT_HEADERS)
+            if r.status_code == 200 and r.text:
+                # Try to parse direct PDF URL from Sci-Hub page
+                pdf = parse_scihub_pdf_url(r.text, r.url)
+                if pdf:
+                    return pdf
+                return url
+            else:
+                if not production_mode:
+                    print(f"Failed with status code: {r.status_code}")
+        except requests.exceptions.RequestException as e:
+            if not production_mode:
+                print(f"Error accessing {url}: {e}")
+    raise ConnectionError("All Sci-Hub domains failed.")
 
 def parse_scihub_pdf_url(html: str, base_url: str) -> str | None:
+    """Parse a likely PDF url from Sci-Hub HTML.
+    Heuristics:
+      - <iframe src="...pdf"> or <embed src="...pdf">
+      - citation pdf links in <a> tags
+    """
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        # iframe/pdf
+        for tag in soup.find_all(['iframe', 'embed'], src=True):
+            src = tag.get('src')
+            if not src:
+                continue
+            if src.lower().endswith('.pdf') or 'pdf' in src.lower():
+                return requests.compat.urljoin(base_url, src)
+        # a href pdf
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if href.lower().endswith('.pdf') or 'pdf' in href.lower():
+                return requests.compat.urljoin(base_url, href)
+    except Exception:
+        return None
     return None
 
 def get_pdf_from_unpaywall(doi: str, email: str | None) -> str | None:
@@ -667,6 +745,51 @@ def get_pdf_from_unpaywall(doi: str, email: str | None) -> str | None:
     except Exception as e:
         if not production_mode:
             print(f"Unpaywall lookup failed: {e}")
+    return None
+
+def get_pdf_from_openalex(doi: str, email: str | None = None) -> str | None:
+    """Try to get PDF URL from OpenAlex."""
+    doi = normalize_doi(doi)
+    if not doi:
+        return None
+    try:
+        url = f"{OPENALEX_BASE}/works/doi:{requests.utils.quote(doi, safe='')}"
+        params = {}
+        if email:
+            params["mailto"] = email
+        r = http_get(url, params=params, headers={**DEFAULT_HEADERS, "Accept": "application/json"}, timeout=30)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        data = r.json() or {}
+        
+        best_oa = data.get("best_oa_location")
+        if best_oa and best_oa.get("url_for_pdf"):
+            return best_oa.get("url_for_pdf")
+            
+        for loc in data.get("oa_locations", []):
+            if loc.get("url_for_pdf"):
+                return loc.get("url_for_pdf")
+                
+        return None
+    except Exception:
+        return None
+
+def get_pdf_from_semanticscholar(doi: str) -> str | None:
+    """Try to get PDF URL from Semantic Scholar."""
+    doi = normalize_doi(doi)
+    if not doi:
+        return None
+    try:
+        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=openAccessPdf"
+        r = http_get(url, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            pdf_info = data.get("openAccessPdf")
+            if pdf_info and pdf_info.get("url"):
+                return pdf_info.get("url")
+    except Exception:
+        pass
     return None
 
 # --- OpenAlex cited-by utilities ---
@@ -916,6 +1039,14 @@ def DownloadFileByUrl(DownloadUrl, FileTitle, subdirectory="main", teacher: str 
                     grew = False
             if wrote_any or grew:
                 try:
+                    # Final size check before moving
+                    size_final = os.path.getsize(part_path)
+                    if size_final < 10 * 1024: # 10KB minimum
+                        if not production_mode:
+                            print(f"Error: Downloaded file too small ({size_final/1024:.1f} KB). Likely corrupted.")
+                        os.remove(part_path)
+                        return None
+
                     os.replace(part_path, full_path)
                     moved = True
                 except Exception:
@@ -1147,9 +1278,15 @@ def download_and_process_doi(doi, subdirectory="main", teacher: str | None = Non
     # Strategy C: Fallback to Sci-Hub if above fails
     if not paperDownloadUrl:
         if not production_mode:
-            print("Step 3: Falling back to Sci-Hub (disabled)...")
-        # Sci-Hub fallback is disabled
-        pass
+            print("Step 3: Falling back to Sci-Hub (may require accessible mirror)...")
+        try:
+            paperDownloadUrl = GetDownloadUrl(doi, scihub_domains=SCIHUB_DOMAINS)
+        except ConnectionError as e:
+            if not production_mode:
+                print(f"Could not get a download URL from any source for {doi}: {e}")
+                print("Proceeding with references only (no file).")
+            # 即便下载失败，也返回已解析的引用，允许继续递归
+            return references or []
 
     # 4. Download the file
     downloaded_file_path = DownloadFileByUrl(paperDownloadUrl, official_title, subdirectory, teacher)
