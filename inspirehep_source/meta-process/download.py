@@ -20,6 +20,19 @@ from typing import Dict, List, Optional, Any, Tuple
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+DEFAULT_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+}
 
 # ==========================================
 # 1. Configuration & Utils
@@ -287,6 +300,35 @@ def get_young_author_years(config) -> int:
 def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
+def validate_pdf(path: Path, min_size_kb: int = 10) -> bool:
+    """
+    Check if a PDF file is valid:
+    1. Exists and is a file.
+    2. Size is greater than min_size_kb.
+    3. Starts with %PDF header.
+    """
+    if not path.exists() or not path.is_file():
+        return False
+    
+    # Check size
+    size_kb = path.stat().st_size / 1024
+    if size_kb < min_size_kb:
+        print(f"  [Warning] PDF too small ({size_kb:.1f} KB): {path.name}")
+        return False
+        
+    # Check header
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(4)
+            if header != b'%PDF':
+                print(f"  [Warning] Invalid PDF header: {path.name}")
+                return False
+    except Exception as e:
+        print(f"  [Error] Failed to read PDF header: {e}")
+        return False
+        
+    return True
+
 def _sanitize_dir_name(name: str) -> str:
     return (
         name.replace('/', '_').replace('\\', '_').replace(':', '_')
@@ -335,7 +377,7 @@ def get_openalex_id_for_doi(doi: str) -> Optional[str]:
     if not doi: return None
     try:
         url = f"{OPENALEX_BASE}/works/doi:{requests.utils.quote(doi, safe='')}"
-        r = requests.get(url, headers={'User-Agent': 'CheckMentor/1.0'}, timeout=30)
+        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=30)
         if r.status_code == 404: return None
         r.raise_for_status()
         data = r.json()
@@ -359,7 +401,7 @@ def get_citing_dois_openalex(doi: str, limit: int = 100) -> List[str]:
     dois = set()
     try:
         while len(dois) < limit:
-            r = requests.get(url, params=params, headers={'User-Agent': 'CheckMentor/1.0'}, timeout=60)
+            r = requests.get(url, params=params, headers=DEFAULT_HEADERS, timeout=60)
             r.raise_for_status()
             data = r.json()
             results = data.get("results", [])
@@ -392,9 +434,9 @@ class InspireHEPClient:
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
         self.session = requests.Session()
+        self.session.headers.update(DEFAULT_HEADERS)
         self.session.headers.update({
             "Accept": "application/json",
-            "User-Agent": "CheckMentor-InspireHEP-Client/1.0"
         })
         retries = Retry(
             total=5, 
@@ -406,10 +448,14 @@ class InspireHEPClient:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
     
-    def _request(self, url: str, params: Optional[Dict] = None, stream: bool = False) -> requests.Response:
+    def _request(self, url: str, params: Optional[Dict] = None, stream: bool = False, **kwargs) -> requests.Response:
         # Random sleep to distribute requests and avoid hitting rate limits
-        time.sleep(random.uniform(0.5, 1.5))
-        response = self.session.get(url, params=params, timeout=self.timeout, stream=stream)
+        if "arxiv.org" in url:
+            time.sleep(random.uniform(3.0, 5.0))
+        else:
+            time.sleep(random.uniform(0.5, 1.5))
+            
+        response = self.session.get(url, params=params, timeout=self.timeout, stream=stream, **kwargs)
         response.raise_for_status()
         return response
 
@@ -456,10 +502,23 @@ class InspireHEPClient:
         }
     
     def download_file(self, url: str, output_path: str) -> None:
-        response = self._request(url, stream=True)
+        kwargs = {}
+        if "arxiv.org" in url:
+            url = url.replace("https://arxiv.org/", "https://export.arxiv.org/")
+            kwargs["headers"] = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
+        response = self._request(url, stream=True, **kwargs)
         with open(output_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk: f.write(chunk)
+        
+        # Validate downloaded file
+        if not validate_pdf(Path(output_path)):
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            raise ValueError(f"Downloaded file is not a valid PDF or too small: {url}")
 
 # ==========================================
 # 3. Downloader Logic (Migrated)
@@ -589,16 +648,56 @@ def fetch_related_ids(client: InspireHEPClient, record_id: str, kind: str, limit
 
 def _pdf_url_from_inspire_metadata_raw(md_raw: Dict[str, Any]) -> Optional[str]:
     docs = md_raw.get("documents", []) or []
+    
+    # Priority 1: Explicit fulltext
+    for doc in docs:
+        if doc.get("fulltext") is True:
+            url = doc.get("url") or doc.get("source")
+            if url: return url
+
+    # Priority 2: Any PDF file
     for doc in docs:
         key = (doc.get("key") or "").lower()
         url = doc.get("url") or doc.get("source")
         if key.endswith(".pdf") and url: return url
         if url and str(url).lower().endswith('.pdf'): return url
+        
     eprints = md_raw.get("arxiv_eprints", []) or []
     if eprints:
         arxiv_id = eprints[0].get("value")
         if arxiv_id: return f"https://arxiv.org/pdf/{arxiv_id}.pdf"
     return None
+
+def get_pdf_url_from_all_sources(client: InspireHEPClient, doi: Optional[str], md_raw: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Try to get PDF URL from all available sources: InspireHEP, Publisher, OpenAlex, Semantic Scholar, Unpaywall, Sci-Hub."""
+    pdf_url = None
+    
+    # 1. Try InspireHEP metadata if provided
+    if md_raw:
+        pdf_url = _pdf_url_from_inspire_metadata_raw(md_raw)
+        if pdf_url: return pdf_url
+        
+    # 2. Try InspireHEP lookup by DOI if not provided
+    if not pdf_url and doi:
+        try:
+            hit = client.find_record_by_doi(doi)
+            if hit:
+                md_raw_hit = hit.get('metadata', {}) or {}
+                pdf_url = _pdf_url_from_inspire_metadata_raw(md_raw_hit)
+                if pdf_url: return pdf_url
+        except Exception: pass
+        
+    # 3. Try other sources via doi_downloader
+    if not pdf_url and doi and doi_downloader:
+        pdf_url = doi_downloader.get_pdf_from_publisher(doi)
+        if not pdf_url: pdf_url = doi_downloader.get_pdf_from_openalex(doi)
+        if not pdf_url: pdf_url = doi_downloader.get_pdf_from_semanticscholar(doi)
+        if not pdf_url: pdf_url = doi_downloader.get_pdf_from_unpaywall(doi, None)
+        if not pdf_url:
+            try: pdf_url = doi_downloader.GetDownloadUrl(doi)
+            except Exception: pass
+            
+    return pdf_url
 
 def dir_name_from_metadata(meta_norm: Dict[str, Any]) -> str:
     doi = meta_norm.get('doi')
@@ -644,13 +743,19 @@ def process_one_by_doi(client: InspireHEPClient, doi: str, out_dir: Path, downlo
             with open(meta_path, 'r', encoding='utf-8') as f:
                 meta_norm = json.load(f)
             
-            if not download or pdf_path.exists():
-                print(f"  [Skipped] {doi} (Files exist)")
+            # Check if PDF exists and is valid
+            pdf_valid = pdf_path.exists() and validate_pdf(pdf_path)
+            
+            if not download or pdf_valid:
+                print(f"  [Skipped] {doi} (Files exist and valid)")
                 item = to_items_metadata(meta_norm)
                 pub_year = item.get("published", {}).get("year")
                 ya = compute_young_author_fields(client, item.get("authors", []), pub_year, years_window)
                 item.update(ya)
                 return item
+            elif pdf_path.exists() and not pdf_valid:
+                print(f"  [Info] Existing PDF for {doi} is invalid, will re-download.")
+                os.remove(pdf_path)
         except Exception:
             pass
 
@@ -682,14 +787,14 @@ def process_one_by_doi(client: InspireHEPClient, doi: str, out_dir: Path, downlo
         if pdf_path.exists():
             print(f"  [Skipped Download] {pdf_filename} exists")
         else:
-            pdf_url = _pdf_url_from_inspire_metadata_raw(md_raw)
+            pdf_url = get_pdf_url_from_all_sources(client, doi, md_raw)
             if pdf_url:
                 try:
                     client.download_file(pdf_url, str(pdf_path))
                 except Exception as e:
                     print(f"警告: 无法下载 PDF ({pdf_url}): {e}")
             else:
-                print(f"  [Warning] No PDF URL found for {doi} in InspireHEP")
+                print(f"  [Warning] No PDF URL found for {doi} in any source")
     
     meta_path = out_dir / f"{_sanitize_dir_name(doi)}_metadata.json"
     if pdf_path.exists():
@@ -703,10 +808,32 @@ def process_one_by_doi(client: InspireHEPClient, doi: str, out_dir: Path, downlo
 
 def process_one_by_record_id_using_url(client: InspireHEPClient, record_id: str, out_dir: Path, download: bool = True, years_window: int = 5, max_pages: Optional[int] = None) -> Dict[str, Any]:
     ensure_dir(out_dir)
+    
+    # Early check: if metadata exists, we can determine base_name and check PDF
+    # But we need meta_norm first to get base_name. 
+    # For simplicity, we'll fetch metadata first, then check.
+    
     rec = client.get_record(record_id)
     md_raw = rec.get('metadata', {}) or {}
     meta_norm = client.get_metadata(record_id)
     
+    base_name = dir_name_from_metadata(meta_norm)
+    pdf_path = out_dir / f"{base_name}.pdf"
+    meta_path = out_dir / f"{base_name}_metadata.json"
+    
+    if meta_path.exists():
+        pdf_valid = pdf_path.exists() and validate_pdf(pdf_path)
+        if not download or pdf_valid:
+            print(f"  [Skipped] {record_id} (Files exist and valid)")
+            item = to_items_metadata(meta_norm)
+            pub_year = item.get("published", {}).get("year")
+            ya = compute_young_author_fields(client, item.get("authors", []), pub_year, years_window)
+            item.update(ya)
+            return item
+        elif pdf_path.exists() and not pdf_valid:
+            print(f"  [Info] Existing PDF for {record_id} is invalid, will re-download.")
+            os.remove(pdf_path)
+
     if should_skip_document(meta_norm.get('document_type', [])):
         print(f"  [Skipped Download] {record_id} is {meta_norm.get('document_type')}")
         download = False
@@ -722,20 +849,19 @@ def process_one_by_record_id_using_url(client: InspireHEPClient, record_id: str,
 
     item = to_items_metadata(meta_norm)
     
-    base_name = dir_name_from_metadata(meta_norm)
-    pdf_path = out_dir / f"{base_name}.pdf"
-    meta_path = out_dir / f"{base_name}_metadata.json"
-    
     if download:
         if pdf_path.exists():
             print(f"  [Skipped Download] {base_name}.pdf exists")
         else:
-            pdf_url = _pdf_url_from_inspire_metadata_raw(md_raw)
+            doi = meta_norm.get('doi')
+            pdf_url = get_pdf_url_from_all_sources(client, doi, md_raw)
             if pdf_url:
                 try:
                     client.download_file(pdf_url, str(pdf_path))
                 except Exception as e:
                     print(f"警告: 关联文献 PDF 下载失败 ({pdf_url}): {e}")
+            else:
+                print(f"  [Warning] No PDF URL found for {record_id} in any source")
     
     if pdf_path.exists() and not meta_path.exists():
         with open(meta_path, 'w', encoding='utf-8') as f:
@@ -751,7 +877,9 @@ def process_one_by_record_id_using_url(client: InspireHEPClient, record_id: str,
 # ==========================================
 
 def _build_header(token: str) -> dict:
-    return {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+    h = DEFAULT_HEADERS.copy()
+    h.update({"Content-Type": "application/json", "Authorization": f"Bearer {token}"})
+    return h
 
 def _file_signature(path: Path, sample_bytes: int = 4 * 1024 * 1024) -> str:
     try:
@@ -875,7 +1003,7 @@ def batch_retrieve(batch_id: str, unique_dict: dict[str, list[str]], file_dir: P
             out_path = output_dir / Path(path).with_suffix(".zip")
             out_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                with requests.get(zip_url, stream=True, timeout=60) as r, open(out_path, 'wb') as f:
+                with requests.get(zip_url, stream=True, timeout=60, headers=DEFAULT_HEADERS) as r, open(out_path, 'wb') as f:
                     shutil.copyfileobj(r.raw, f)
                 print(f"Downloaded: {out_path}")
                 process_zip_file(out_path)
@@ -962,10 +1090,120 @@ def convert_pdfs_to_md(teacher: str, pdf_root: Path, md_root: Path, token: str):
         print(f"Batch ID: {batch_id}")
         batch_retrieve(batch_id, uniques, file_dir, output_dir, header)
         _replicate_duplicates(duplicates_map, output_dir)
+        
+        # Cleanup PDFs that have been successfully converted
+        print("  Cleaning up converted PDFs...")
+        for pdf_name in uniques.keys():
+            pdf_path = file_dir / pdf_name
+            # Check if MD exists (simple check based on name)
+            # Note: batch_retrieve saves as .md, but might be in subfolders if we passed relative paths?
+            # _gather_candidates_and_duplicates uses rglob, so keys in uniques are relative paths or names.
+            # Let's assume if batch_retrieve succeeded, we can delete.
+            # Or better, check if corresponding MD exists.
+            
+            # uniques keys are relative paths from file_dir (as strings) or filenames?
+            # In _gather_candidates_and_duplicates: uniques[rel_path] = file_id (initially None)
+            
+            # Construct expected MD path
+            # If pdf is "main/paper.pdf", md should be "main/paper.md"
+            rel_path = Path(pdf_name)
+            md_path = output_dir / rel_path.with_suffix('.md')
+            
+            if md_path.exists():
+                try:
+                    if pdf_path.exists():
+                        pdf_path.unlink()
+                    
+                    # Delete corresponding metadata json
+                    meta_json = pdf_path.with_name(f"{pdf_path.stem}_metadata.json")
+                    if meta_json.exists():
+                        meta_json.unlink()
+
+                except Exception as e:
+                    print(f"    Failed to delete source files for {pdf_path.name}: {e}")
+            
+        # Also cleanup duplicates if their primary MD exists
+        for dup_name, pri_name in duplicates_map.items():
+             pri_md_path = output_dir / Path(pri_name).with_suffix('.md')
+             if pri_md_path.exists():
+                 dup_pdf_path = file_dir / dup_name
+                 if dup_pdf_path.exists():
+                     try:
+                         dup_pdf_path.unlink()
+                         
+                         # Delete corresponding metadata json for duplicate
+                         dup_meta = dup_pdf_path.with_name(f"{dup_pdf_path.stem}_metadata.json")
+                         if dup_meta.exists():
+                             dup_meta.unlink()
+                     except Exception: pass
 
 # ==========================================
 # 5. Main Logic
 # ==========================================
+
+def safe_cleanup_converted_files(teacher_dir: Path):
+    """
+    Safely delete PDF, ZIP, and JSON files only if the corresponding MD file exists.
+    """
+    print(f"  Safe cleanup for {teacher_dir.name}...")
+    for subdir_name in ['main', 'ref1', 'cited']:
+        subdir = teacher_dir / subdir_name
+        if not subdir.exists(): continue
+        
+        # Gather all candidate files by stem
+        candidates = defaultdict(list)
+        for p in subdir.iterdir():
+            if not p.is_file(): continue
+            if p.suffix.lower() in ['.pdf', '.zip', '.json']:
+                # Identify stem
+                if p.name.endswith('_metadata.json'):
+                    stem = p.name[:-14]
+                else:
+                    stem = p.stem
+                candidates[stem].append(p)
+        
+        for stem, files in candidates.items():
+            # Check if MD exists with this stem
+            md_path = subdir / f"{stem}.md"
+            should_delete = False
+            
+            if md_path.exists():
+                should_delete = True
+            else:
+                # Check for title-based MD using metadata
+                meta_json = next((f for f in files if f.name.endswith('_metadata.json')), None)
+                
+                if meta_json:
+                    try:
+                        with open(meta_json, 'r', encoding='utf-8') as f:
+                            meta = json.load(f)
+                            title = meta.get('title')
+                            if title:
+                                sanitized_title = _sanitize_dir_name(title)
+                                if len(sanitized_title) > 150:
+                                    sanitized_title = sanitized_title[:150]
+                                
+                                title_md_path = subdir / f"{sanitized_title}.md"
+                                if title_md_path.exists():
+                                    should_delete = True
+                    except Exception:
+                        pass
+            
+            if should_delete:
+                for p in files:
+                    try:
+                        if p.exists():
+                            p.unlink()
+                    except Exception as e:
+                        print(f"    Failed to delete {p.name}: {e}")
+
+        # Unconditionally delete 'images' folder
+        images_dir = subdir / 'images'
+        if images_dir.exists() and images_dir.is_dir():
+            try:
+                shutil.rmtree(images_dir)
+            except Exception as e:
+                print(f"    Failed to delete images folder in {subdir_name}: {e}")
 
 def cleanup_intermediate_files(teacher_dir: Path):
     """
@@ -1047,20 +1285,37 @@ def process_one_by_doi_generic(client, doi, output_dir, role='main', download=Tr
         raise ValueError(f"Could not get title for {doi}")
         
     base_name = _sanitize_dir_name(doi)
+    pdf_path = output_dir / f"{base_name}.pdf"
+    meta_path = output_dir / f"{base_name}_metadata.json"
     
-    if download:
-        pdf_url = doi_downloader.get_pdf_from_publisher(doi)
-        if not pdf_url:
-            pdf_url = doi_downloader.get_pdf_from_unpaywall(doi, None)
-        if not pdf_url:
+    if meta_path.exists():
+        pdf_valid = pdf_path.exists() and validate_pdf(pdf_path)
+        if not download or pdf_valid:
+            print(f"    [Generic] [Skipped] {doi} (Files exist and valid)")
             try:
-                pdf_url = doi_downloader.GetDownloadUrl(doi)
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    meta_simple = json.load(f)
+                item = {
+                    "title": meta_simple.get("title"),
+                    "doi": meta_simple.get("doi"),
+                    "authors": meta_simple.get("authors"),
+                    "published": parse_year_month(meta_simple.get("publication_date")),
+                    "role": meta_simple.get("role"),
+                    "record_id": None,
+                    "inspire_url": None,
+                    "citations_count": 0
+                }
+                return item
             except Exception: pass
-            
+        elif pdf_path.exists() and not pdf_valid:
+            print(f"    [Generic] [Info] Existing PDF for {doi} is invalid, will re-download.")
+            os.remove(pdf_path)
+
+    if download:
+        pdf_url = get_pdf_url_from_all_sources(client, doi)
         if not pdf_url:
-            raise ValueError(f"Could not get PDF URL for {doi}")
+            raise ValueError(f"Could not get PDF URL for {doi} in any source")
             
-        pdf_path = output_dir / f"{base_name}.pdf"
         client.download_file(pdf_url, str(pdf_path))
 
     # Create minimal metadata
@@ -1120,7 +1375,7 @@ def process_doi_task(args_tuple):
         # If method is doi_source, we might not have record_id, but we still want to fetch related papers if possible.
         # But fetch_related_ids needs record_id (for inspire) or DOI (for openalex).
         # If we have DOI, we can use OpenAlex for citations.
-        # For references, we need record_id for Inspire, or we can use OpenAlex if we implement it.
+        # For references, it needs record_id for Inspire, or it can use OpenAlex if implemented.
         # fetch_related_ids supports DOI for citations (OpenAlex).
         # For references, it currently only supports Inspire record_id.
         
@@ -1223,13 +1478,7 @@ def process_doi_task(args_tuple):
                                 official_title = doi_downloader.get_official_title_from_doi(tid)
                                 if official_title:
                                     # Try to get PDF URL
-                                    pdf_url = doi_downloader.get_pdf_from_publisher(tid)
-                                    if not pdf_url:
-                                        pdf_url = doi_downloader.get_pdf_from_unpaywall(tid, None)
-                                    if not pdf_url:
-                                        try:
-                                            pdf_url = doi_downloader.GetDownloadUrl(tid)
-                                        except Exception: pass
+                                    pdf_url = get_pdf_url_from_all_sources(client, tid)
                                     
                                     if pdf_url:
                                         base_name = _sanitize_dir_name(tid)
@@ -1314,6 +1563,7 @@ def main():
     parser.add_argument('--force', action='store_true', help='Force re-process even if already processed. Will reset progress for the target teacher(s).')
     parser.add_argument('--method', choices=['inspire', 'doi_source'], default='inspire', help='Download method to use')
     parser.add_argument('--retry', action='store_true', help='Retry downloading items present in metadata but missing MD files')
+    parser.add_argument('--convert-only', action='store_true', help='Only convert existing PDFs to MD, skip download')
     args = parser.parse_args()
 
     if args.method == 'doi_source':
@@ -1339,6 +1589,35 @@ def main():
     workers_main, workers_related = get_worker_cfg(config)
     limit_ref, limit_cited = get_limit_cfg(config)
     
+    data_root = PROJ_ROOT / 'data'
+
+    if args.convert_only:
+        if not args.token:
+            print("Error: MINERU_TOKEN is required for conversion.")
+            return
+            
+        teachers_to_process = []
+        if args.teacher:
+            teachers_to_process = [args.teacher]
+        else:
+            # Scan data directory
+            if data_root.exists():
+                teachers_to_process = [d.name for d in data_root.iterdir() if d.is_dir()]
+            else:
+                print(f"Data directory not found: {data_root}")
+                return
+            
+        for teacher in teachers_to_process:
+            print(f"\n[Convert Only] Processing Teacher: {teacher}")
+            teacher_dir = data_root / teacher
+            if not teacher_dir.exists():
+                print(f"  Directory not found: {teacher_dir}")
+                continue
+                
+            convert_pdfs_to_md(teacher, data_root, data_root, args.token)
+            safe_cleanup_converted_files(teacher_dir)
+        return
+
     papers_data = parse_papers_data(Path(args.papers_data))
     
     if args.teacher:
@@ -1350,7 +1629,7 @@ def main():
 
     processed_records = load_progress()
     
-    data_root = PROJ_ROOT / 'data'
+    # data_root is already defined above
     
     for teacher, dois in papers_data.items():
         print(f"\nProcessing Teacher: {teacher}")

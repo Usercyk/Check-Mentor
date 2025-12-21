@@ -98,7 +98,7 @@ if __name__ == "__main__":
     
     if not data_dir.exists():
         # Fallback to absolute path if relative path fails (e.g. if structure is different)
-        data_dir = Path(r"d:\programs\checkmentor\Check-Mentor-1\data")
+        data_dir = Path(r"E:\program\Check-Mentor-1\data")
         
     print(f"Using data directory: {data_dir}")
     update_metadata(data_dir)

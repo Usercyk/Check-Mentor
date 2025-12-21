@@ -39,8 +39,20 @@ retry_strategy = Retry(
 adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("http://", adapter)
 session.mount("https://", adapter)
+
 DEFAULT_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
 }
 
 # Default networking knobs (overridable via CLI)
@@ -74,7 +86,13 @@ class RateLimiter:
             now = time.monotonic()
             elapsed = now - self.last
             if elapsed < self.interval:
-                time.sleep(self.interval - elapsed)
+                # Add random jitter to avoid being detected as a bot
+                jitter = random.uniform(0.1, 0.5)
+                time.sleep(self.interval - elapsed + jitter)
+                now = time.monotonic()
+            else:
+                # Even if we don't need to wait, add a tiny random sleep
+                time.sleep(random.uniform(0.05, 0.2))
                 now = time.monotonic()
             self.last = now
 
@@ -729,6 +747,51 @@ def get_pdf_from_unpaywall(doi: str, email: str | None) -> str | None:
             print(f"Unpaywall lookup failed: {e}")
     return None
 
+def get_pdf_from_openalex(doi: str, email: str | None = None) -> str | None:
+    """Try to get PDF URL from OpenAlex."""
+    doi = normalize_doi(doi)
+    if not doi:
+        return None
+    try:
+        url = f"{OPENALEX_BASE}/works/doi:{requests.utils.quote(doi, safe='')}"
+        params = {}
+        if email:
+            params["mailto"] = email
+        r = http_get(url, params=params, headers={**DEFAULT_HEADERS, "Accept": "application/json"}, timeout=30)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        data = r.json() or {}
+        
+        best_oa = data.get("best_oa_location")
+        if best_oa and best_oa.get("url_for_pdf"):
+            return best_oa.get("url_for_pdf")
+            
+        for loc in data.get("oa_locations", []):
+            if loc.get("url_for_pdf"):
+                return loc.get("url_for_pdf")
+                
+        return None
+    except Exception:
+        return None
+
+def get_pdf_from_semanticscholar(doi: str) -> str | None:
+    """Try to get PDF URL from Semantic Scholar."""
+    doi = normalize_doi(doi)
+    if not doi:
+        return None
+    try:
+        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=openAccessPdf"
+        r = http_get(url, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            pdf_info = data.get("openAccessPdf")
+            if pdf_info and pdf_info.get("url"):
+                return pdf_info.get("url")
+    except Exception:
+        pass
+    return None
+
 # --- OpenAlex cited-by utilities ---
 def get_openalex_id_for_doi(doi: str, email: str | None = None) -> str | None:
     doi = normalize_doi(doi)
@@ -976,6 +1039,14 @@ def DownloadFileByUrl(DownloadUrl, FileTitle, subdirectory="main", teacher: str 
                     grew = False
             if wrote_any or grew:
                 try:
+                    # Final size check before moving
+                    size_final = os.path.getsize(part_path)
+                    if size_final < 10 * 1024: # 10KB minimum
+                        if not production_mode:
+                            print(f"Error: Downloaded file too small ({size_final/1024:.1f} KB). Likely corrupted.")
+                        os.remove(part_path)
+                        return None
+
                     os.replace(part_path, full_path)
                     moved = True
                 except Exception:
