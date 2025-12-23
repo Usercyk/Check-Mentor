@@ -78,18 +78,10 @@ class FinalAnalyzer:
         
         return report_content
 
-    def generate_final_report(self, results: Dict[str, Any]) -> str:
+    def generate_report_body(self, results: Dict[str, Any]) -> str:
         """
-        生成最终的 Markdown 格式报告。
-
-        Args:
-            results (Dict[str, Any]): 来自 WorkflowOrchestrator 的完整结果。
-        
-        Returns:
-            str: 格式化后的完整报告。
+        生成报告的主体部分（前三章），这部分需要翻译。
         """
-        print("  -> Generating final report...")
-        
         # 从传入的 results 中提取各个部分
         contribution_analysis = results.get('contribution_analysis', {})
         field_problems_analysis = results.get('field_problems_analysis', {})
@@ -133,15 +125,15 @@ class FinalAnalyzer:
         undergrad_summary = self._get_with_warning(undergrad_projects_analysis, 'summary', '未能生成本科生项目建议。', 'undergrad_projects_analysis')
         undergrad_projects_summary_str += f"{undergrad_summary}\n\n"
         
-        project_ideas = self._get_with_warning(undergrad_projects_analysis, 'project_ideas', [], 'undergrad_projects_analysis')
-        #if project_ideas:
-            #undergrad_projects_summary_str += "### 具体项目构想:\n"
-            #for i, idea in enumerate(project_ideas, 1):
-            #    undergrad_projects_summary_str += f"**{i}. 项目名称: {idea.get('project_title', 'N/A')}**\n"
-            #    undergrad_projects_summary_str += f"   - **研究目标**: {idea.get('research_goal', 'N/A')}\n"
-            #    undergrad_projects_summary_str += f"   - **核心任务**: {idea.get('core_tasks', 'N/A')}\n"
-            #    undergrad_projects_summary_str += f"   - **预期成果**: {idea.get('expected_outcomes', 'N/A')}\n"
-            #    undergrad_projects_summary_str += f"   - **参考论文**: {idea.get('reference_paper_title', 'N/A')}\n\n"
+        return report_title + contribution_summary_str + hot_topics_summary_str + undergrad_projects_summary_str
+
+    def generate_report_appendix(self, results: Dict[str, Any]) -> str:
+        """
+        生成报告的附录部分（数据来源），这部分不需要翻译，保留原文（通常是英文论文标题）。
+        """
+        contribution_analysis = results.get('contribution_analysis', {})
+        field_problems_analysis = results.get('field_problems_analysis', {})
+        undergrad_projects_analysis = results.get('undergrad_projects_analysis', {})
 
         # 4. 数据来源附录
         appendix = "## 四、分析数据来源\n\n"
@@ -191,14 +183,25 @@ class FinalAnalyzer:
         else:
             appendix += "- 无\n"
         appendix += "\n"
+        
+        return appendix
 
-        final_report = (
-            report_title
-            + contribution_summary_str
-            + hot_topics_summary_str
-            + undergrad_projects_summary_str
-            + appendix
-        )
+    def generate_final_report(self, results: Dict[str, Any]) -> str:
+        """
+        生成最终的 Markdown 格式报告。
+
+        Args:
+            results (Dict[str, Any]): 来自 WorkflowOrchestrator 的完整结果。
+        
+        Returns:
+            str: 格式化后的完整报告。
+        """
+        print("  -> Generating final report...")
+        
+        body = self.generate_report_body(results)
+        appendix = self.generate_report_appendix(results)
+
+        final_report = body + appendix
         
         print("  -> Final report generated successfully.")
         return final_report

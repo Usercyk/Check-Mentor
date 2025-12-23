@@ -329,11 +329,19 @@ class WorkflowOrchestrator:
 
         # 步骤 3: 整合结果并生成最终报告
         self._print_section_header("任务三：整合结果并生成最终报告", level=2)
-        english_report = self.final_analyzer.generate_final_report(all_results)
+        
+        # 分别生成报告主体（前三章）和附录（第四章）
+        report_body = self.final_analyzer.generate_report_body(all_results)
+        report_appendix = self.final_analyzer.generate_report_appendix(all_results)
 
         # 步骤 4: 将报告翻译为中文
         self._print_section_header("任务四：翻译报告为中文", level=2)
-        chinese_report = self.final_analyzer.translate_report(english_report, "Chinese")
+        
+        # 仅翻译报告主体
+        chinese_body = self.final_analyzer.translate_report(report_body, "Chinese")
+        
+        # 将未翻译的附录拼接到翻译后的主体后面
+        chinese_report = chinese_body + "\n\n" + report_appendix
 
         # 步骤 5: 保存最终报告
         report_filename = config.OUTPUT_DIR / f"{self.professor_name}_final_report.md"
