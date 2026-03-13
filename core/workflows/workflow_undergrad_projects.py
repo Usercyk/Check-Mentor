@@ -316,6 +316,7 @@ Your summary should:
 1. Group the project ideas into 2-3 thematic areas.
 2. Provide a brief, encouraging narrative about why these areas are exciting for undergraduate research.
 3. Be about 150-200 words.
+4. IMPORTANT: Do NOT identify yourself as an AI. Do NOT start with "Here is a summary" or "Based on the papers". Start directly with the summary content.
 
 Synthesized Summary of Project Suggestions:""")
 
@@ -461,8 +462,24 @@ Synthesized Summary of Project Suggestions:""")
                     'weighted_score': round(weighted_score, 4),
                     'recency_score': recency_score
                 }
+                
+                # 注入 DOI 和 INSPIRE URL
+                if paper_metadata:
+                    if paper_metadata.get('doi'):
+                        evaluation['doi'] = paper_metadata['doi']
+                    if paper_metadata.get('inspire_url'):
+                        evaluation['inspire_url'] = paper_metadata['inspire_url']
+
                 self.cache.set(paper_id, evaluation)
                 time.sleep(1) # Delay after successful API call
+
+            # 统一注入 DOI 和 INSPIRE URL (适用于缓存和非缓存路径)
+            paper_metadata = paper.get('metadata')
+            if paper_metadata:
+                if 'doi' not in evaluation and paper_metadata.get('doi'):
+                    evaluation['doi'] = paper_metadata['doi']
+                if 'inspire_url' not in evaluation and paper_metadata.get('inspire_url'):
+                    evaluation['inspire_url'] = paper_metadata['inspire_url']
 
             all_evaluated_papers.append(evaluation)
 
@@ -500,7 +517,7 @@ Synthesized Summary of Project Suggestions:""")
             project_ideas = []
 
         # 步骤4: 格式化最终输出
-        final_result = {
+        return {
             "summary": summary,
             "project_ideas": project_ideas,
             "rated_papers": [
@@ -508,6 +525,8 @@ Synthesized Summary of Project Suggestions:""")
                     "paper_id": p['paper_id'],
                     "title": p['title'],
                     "score": p.get('weighted_score', 'N/A'),
+                    "doi": p.get('doi'), # Explicitly include DOI
+                    "inspire_url": p.get('inspire_url'), # Explicitly include URL
                     "details": {
                         "relevance": p.get('relevance_score', 'N/A'),
                         "accessibility": p.get('accessibility_score', 'N/A'),
@@ -519,5 +538,3 @@ Synthesized Summary of Project Suggestions:""")
                 for p in all_evaluated_papers
             ]
         }
-
-        return final_result

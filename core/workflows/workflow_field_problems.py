@@ -373,6 +373,15 @@ Example Output:
                     if all(k in cached_result for k in ['significance_score', 'novelty_score', 'clarity_score', 'potential_score']):
                         # 将缓存结果与元数据合并
                         full_cached_result = {**cached_result, 'paper_id': paper_id, 'title': paper['title']}
+                        
+                        # 注入 DOI 和 INSPIRE URL
+                        paper_metadata = paper.get('metadata')
+                        if paper_metadata:
+                            if paper_metadata.get('doi'):
+                                full_cached_result['doi'] = paper_metadata['doi']
+                            if paper_metadata.get('inspire_url'):
+                                full_cached_result['inspire_url'] = paper_metadata['inspire_url']
+                        
                         rated_papers.append(full_cached_result)
                         continue
                     else:
@@ -421,12 +430,26 @@ Example Output:
                 analysis_result["weighted_score"] = round(weighted_score, 2)
                 analysis_result["recency_score"] = recency_score  # 记录时效性得分
 
+                # 注入 DOI 和 INSPIRE URL
+                if paper_metadata:
+                    if paper_metadata.get('doi'):
+                        analysis_result['doi'] = paper_metadata['doi']
+                    if paper_metadata.get('inspire_url'):
+                        analysis_result['inspire_url'] = paper_metadata['inspire_url']
+
                 full_result = {
                     **analysis_result, 
                     "paper_id": paper_id, 
                     "title": paper["title"],
                     "source_type": paper.get('source_type', 'primary')
                 }
+                
+                # 注入 DOI 和 INSPIRE URL
+                if paper_metadata:
+                    if paper_metadata.get('doi'):
+                        full_result['doi'] = paper_metadata['doi']
+                    if paper_metadata.get('inspire_url'):
+                        full_result['inspire_url'] = paper_metadata['inspire_url']
                 
                 rated_papers.append(full_result)
                 self.cache.set(paper_id, analysis_result)
@@ -497,18 +520,9 @@ Example Output:
 
         summary_result = self._summarize_hot_topics(synthesis_context)
 
-        final_result = {
+        return {
             "summary": summary_result.get("summary", "Could not generate summary."),
             "hot_topics": summary_result.get("hot_topics", []),
-            "analyzed_papers": [p["title"] for p in top_papers],
-            "rated_papers": [
-                {
-                    "title": p["title"],
-                    "weighted_score": p.get("weighted_score", 0.0)
-                }
-                for p in rated_papers
-            ]
+            "analyzed_papers": top_papers, # Return full objects
+            "rated_papers": rated_papers # Return full objects including DOI/URL
         }
-
-        print("✅ Workflow 2 completed successfully.")
-        return final_result

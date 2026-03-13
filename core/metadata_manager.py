@@ -23,6 +23,7 @@ class PaperMetadata:
     def __init__(
         self,
         doi: str = "",
+        inspire_url: Optional[str] = None,
         authors: List[str] = None,
         publish_year: Optional[int] = None,
         publish_month: Optional[int] = None
@@ -32,11 +33,13 @@ class PaperMetadata:
         
         Args:
             doi: 论文的DOI标识符
+            inspire_url: INSPIRE数据库链接
             authors: 作者列表
             publish_year: 发布年份
             publish_month: 发布月份
         """
         self.doi = doi
+        self.inspire_url = inspire_url
         self.authors = authors if authors is not None else []
         self.publish_year = publish_year
         self.publish_month = publish_month
@@ -45,6 +48,7 @@ class PaperMetadata:
         """转换为字典格式（向后兼容）"""
         result = {
             "doi": self.doi,
+            "inspire_url": self.inspire_url,
             "authors": self.authors,
         }
         
@@ -86,6 +90,7 @@ class PaperMetadata:
         
         return cls(
             doi=data.get("doi", ""),
+            inspire_url=data.get("inspire_url"),
             authors=data.get("authors", []),
             publish_year=publish_year,
             publish_month=publish_month

@@ -420,6 +420,14 @@ You MUST provide a JSON response with a `research_directions` key (a list of str
                 # 确保缓存的结果也包含时效性得分（如果论文有这个字段）
                 if 'recency_score' not in single_analysis and 'recency_score' in paper:
                     single_analysis['recency_score'] = paper['recency_score']
+                
+                # 即使是缓存结果，也尝试注入最新的元数据(DOI/URL)
+                paper_metadata = paper.get('metadata')
+                if paper_metadata:
+                    if 'doi' not in single_analysis and paper_metadata.get('doi'):
+                        single_analysis['doi'] = paper_metadata['doi']
+                    if 'inspire_url' not in single_analysis and paper_metadata.get('inspire_url'):
+                        single_analysis['inspire_url'] = paper_metadata['inspire_url']
             else:
                 content = self._load_paper_content(paper['md_filename'])
                 if not content:
@@ -442,6 +450,13 @@ You MUST provide a JSON response with a `research_directions` key (a list of str
                     'title': paper['title'],
                     'source_type': paper.get('source_type', 'primary')
                 }
+                
+                # 注入 DOI 和 INSPIRE URL（如果元数据存在）
+                if paper_metadata:
+                    if paper_metadata.get('doi'):
+                        single_analysis['doi'] = paper_metadata['doi']
+                    if paper_metadata.get('inspire_url'):
+                        single_analysis['inspire_url'] = paper_metadata['inspire_url']
                 
                 # 如果论文有时效性得分，也包含进去
                 if 'recency_score' in paper:
@@ -467,10 +482,10 @@ You MUST provide a JSON response with a `research_directions` key (a list of str
         final_summary = self._synthesize_results(all_single_analyses)
 
         # 步骤3: 格式化最终输出
-        final_result = {
+        return {
             "research_directions": final_summary.get("research_directions", []),
             "contribution_summary": final_summary.get("contribution_summary", "未能生成核心贡献总结。"),
-            "analyzed_papers": [p["title"] for p in all_single_analyses],
+            "analyzed_papers": all_single_analyses,  # Return full objects to include metadata like DOI/URL
             "key_contributions": [
                 {
                     "paper_id": analysis['paper_id'],
@@ -480,5 +495,3 @@ You MUST provide a JSON response with a `research_directions` key (a list of str
                 for analysis in all_single_analyses
             ]
         }
-
-        return final_result
