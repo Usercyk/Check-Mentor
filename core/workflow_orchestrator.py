@@ -277,6 +277,31 @@ class WorkflowOrchestrator:
         wf3_main = prepared["wf3_main"]
         wf3_cited = prepared["wf3_cited"]
 
+        def is_core(p: Dict[str, Any]) -> bool:
+            md = p.get("metadata") if isinstance(p, dict) else None
+            return bool(md.get("is_core_journal", False)) if isinstance(md, dict) else False
+
+        # Workflow-level analysis tasks (papers passed to AI in three workflows)
+        workflow_tasks = wf1_main + wf2_main + wf2_ref1 + wf2_cited + wf3_main + wf3_cited
+        total_analysis_tasks = len(workflow_tasks)
+        core_analysis_tasks = sum(1 for p in workflow_tasks if is_core(p))
+
+        # Unique paper-level statistics (deduplicated by paper_id)
+        unique_papers = {}
+        for p in workflow_tasks:
+            if isinstance(p, dict) and p.get("id"):
+                unique_papers[p["id"]] = p
+        total_unique_papers = len(unique_papers)
+        core_unique_papers = sum(1 for p in unique_papers.values() if is_core(p))
+
+        print(
+            "[ANALYSIS_STATS] "
+            f"workflow_tasks_total={total_analysis_tasks}, "
+            f"workflow_tasks_core={core_analysis_tasks}, "
+            f"unique_papers_total={total_unique_papers}, "
+            f"unique_papers_core={core_unique_papers}"
+        )
+
         # 创建日志目录
         log_dir = "log"
         os.makedirs(log_dir, exist_ok=True)

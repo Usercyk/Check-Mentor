@@ -248,7 +248,8 @@ Instructions:
 2.  Identify 2-4 overarching themes or "hot topics" that emerge from the collective 'Identified Problem' fields.
 3.  For each topic, formulate a concise `topic_name` and `challenge`.
 4.  Group the paper titles under the most relevant `hot_topics` they belong to. A paper can be listed under multiple topics if it's relevant.
-5.  Write the final `summary` narrative based on all the information.
+5.  For `related_papers`, you MUST use exact paper titles from the provided context only. Do NOT invent, rewrite, or normalize titles.
+6.  Write the final `summary` narrative based on all the information.
 """),
             ("user", "The context containing the top-rated papers is provided above. Please generate the JSON output.")
         ])
@@ -381,6 +382,9 @@ Example Output:
                                 full_cached_result['doi'] = paper_metadata['doi']
                             if paper_metadata.get('inspire_url'):
                                 full_cached_result['inspire_url'] = paper_metadata['inspire_url']
+                            full_cached_result['is_core_journal'] = bool(paper_metadata.get('is_core_journal', False))
+                        else:
+                            full_cached_result['is_core_journal'] = False
                         
                         rated_papers.append(full_cached_result)
                         continue
@@ -436,6 +440,9 @@ Example Output:
                         analysis_result['doi'] = paper_metadata['doi']
                     if paper_metadata.get('inspire_url'):
                         analysis_result['inspire_url'] = paper_metadata['inspire_url']
+                    analysis_result['is_core_journal'] = bool(paper_metadata.get('is_core_journal', False))
+                else:
+                    analysis_result['is_core_journal'] = False
 
                 full_result = {
                     **analysis_result, 
@@ -450,6 +457,9 @@ Example Output:
                         full_result['doi'] = paper_metadata['doi']
                     if paper_metadata.get('inspire_url'):
                         full_result['inspire_url'] = paper_metadata['inspire_url']
+                    full_result['is_core_journal'] = bool(paper_metadata.get('is_core_journal', False))
+                else:
+                    full_result['is_core_journal'] = False
                 
                 rated_papers.append(full_result)
                 self.cache.set(paper_id, analysis_result)
@@ -473,14 +483,23 @@ Example Output:
         high_score_papers = [p for p in rated_papers if p.get("weighted_score", 0.0) >= high_score_threshold]
         print(f"  -> Found {len(high_score_papers)} papers with score >= {high_score_threshold}.")
 
+        # 优先使用核心期刊论文做热点综合；若没有核心期刊高分论文，则回退到全部高分论文
+        core_high_score_papers = [p for p in high_score_papers if bool(p.get("is_core_journal", False))]
+        if core_high_score_papers:
+            synthesis_candidates = core_high_score_papers
+            print(f"  -> Prioritizing core-journal papers for synthesis: {len(core_high_score_papers)} selected.")
+        else:
+            synthesis_candidates = high_score_papers
+            print("  -> No core-journal papers in high-score set. Falling back to all high-score papers.")
+
         # 如果高质量论文过多，则进行聚类和代表性采样
-        if len(high_score_papers) > 10:
+        if len(synthesis_candidates) > 10:
             # 1. LLM语义聚类
-            clusters = self._cluster_papers_by_llm(high_score_papers)
+            clusters = self._cluster_papers_by_llm(synthesis_candidates)
             
             # 2. 代表性提取
             representative_papers = []
-            paper_map = {p["title"]: p for p in high_score_papers}
+            paper_map = {p["title"]: p for p in synthesis_candidates}
             
             for theme, titles in clusters.items():
                 if not titles: continue
@@ -500,7 +519,7 @@ Example Output:
         else:
             # 如果论文数量不多，直接使用所有高分论文
             print("  -> Number of high-score papers is manageable. Using all for synthesis.")
-            top_papers = high_score_papers
+            top_papers = synthesis_candidates
 
         if not top_papers:
             print("    ⚠️ No high-score papers found. Cannot synthesize hot topics.")

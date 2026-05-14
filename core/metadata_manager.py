@@ -24,6 +24,7 @@ class PaperMetadata:
         self,
         doi: str = "",
         inspire_url: Optional[str] = None,
+        is_core_journal: bool = False,
         authors: List[str] = None,
         publish_year: Optional[int] = None,
         publish_month: Optional[int] = None
@@ -34,12 +35,14 @@ class PaperMetadata:
         Args:
             doi: 论文的DOI标识符
             inspire_url: INSPIRE数据库链接
+            is_core_journal: 是否核心期刊来源
             authors: 作者列表
             publish_year: 发布年份
             publish_month: 发布月份
         """
         self.doi = doi
         self.inspire_url = inspire_url
+        self.is_core_journal = bool(is_core_journal)
         self.authors = authors if authors is not None else []
         self.publish_year = publish_year
         self.publish_month = publish_month
@@ -49,6 +52,7 @@ class PaperMetadata:
         result = {
             "doi": self.doi,
             "inspire_url": self.inspire_url,
+            "is_core_journal": self.is_core_journal,
             "authors": self.authors,
         }
         
@@ -91,6 +95,7 @@ class PaperMetadata:
         return cls(
             doi=data.get("doi", ""),
             inspire_url=data.get("inspire_url"),
+            is_core_journal=bool(data.get("is_core_journal", False)),
             authors=data.get("authors", []),
             publish_year=publish_year,
             publish_month=publish_month

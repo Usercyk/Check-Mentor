@@ -32,7 +32,7 @@ class StreamInterceptor:
         # Keywords to trigger logging (case-insensitive)
         self.error_keywords = [
             "error", "exception", "traceback", "fail", "fatal", 
-            "❌", "⚠️", "🔴", "quota", "401", "403", "500"
+            "❌", "⚠️", "🔴", "quota", "401", "403", "500", "analysis_stats"
         ]
 
     def write(self, message):

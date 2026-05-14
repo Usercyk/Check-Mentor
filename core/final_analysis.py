@@ -141,7 +141,7 @@ class FinalAnalyzer:
         paper_map = {}
         if rated_papers:
             for p in rated_papers:
-                if isinstance(p, dict) and p.get('title'):
+                if isinstance(p, dict) and p.get('title') and self._is_core_journal(p):
                     paper_map[p['title']] = p
 
         hot_topics = self._get_with_warning(field_problems_analysis, 'hot_topics', [], 'field_problems_analysis')
@@ -154,12 +154,12 @@ class FinalAnalyzer:
                 related_papers = topic.get('related_papers', [])
                 papers_with_links = []
                 for title in related_papers:
-                    link = ""
-                    if title in paper_map:
-                        link = self._get_paper_link(paper_map[title])
-                    papers_with_links.append(f"{title}{link}")
-                
-                hot_topics_summary_str += f"   - **相关论文**: {', '.join(papers_with_links)}\n\n"
+                    paper_obj = paper_map.get(title)
+                    if paper_obj and self._is_core_journal(paper_obj):
+                        papers_with_links.append(self._format_title_with_link(title, paper_obj))
+
+                related_text = ', '.join(papers_with_links) if papers_with_links else '无'
+                hot_topics_summary_str += f"   - **相关论文**: {related_text}\n\n"
 
         # 3. 本科生可参与项目
         undergrad_projects_summary_str = "## 三、本科生可参与的研究项目建议\n\n"
@@ -168,16 +168,29 @@ class FinalAnalyzer:
         
         return report_title + contribution_summary_str + hot_topics_summary_str + undergrad_projects_summary_str
 
-    def _get_paper_link(self, paper: Any) -> str:
-        """Helper to extract link from paper object."""
+    def _get_paper_url(self, paper: Any) -> str:
+        """Extract a URL from paper metadata with inspire_url priority over DOI."""
         if not isinstance(paper, dict):
             return ""
-        
+
         if paper.get('inspire_url'):
-            return f" ({paper['inspire_url']})"
-        elif paper.get('doi'):
-            return f" (https://doi.org/{paper['doi']})"
+            return str(paper['inspire_url'])
+        if paper.get('doi'):
+            return f"https://doi.org/{paper['doi']}"
         return ""
+
+    def _format_title_with_link(self, title: str, paper: Any) -> str:
+        """Return markdown link format when URL exists, otherwise return plain title."""
+        url = self._get_paper_url(paper)
+        if url:
+            return f"[{title}]({url})"
+        return title
+
+    def _is_core_journal(self, paper: Any) -> bool:
+        """Return whether paper is marked as core journal, defaulting to False."""
+        if not isinstance(paper, dict):
+            return False
+        return bool(paper.get('is_core_journal', False))
 
     def generate_report_appendix(self, results: Dict[str, Any]) -> str:
         """
@@ -191,15 +204,16 @@ class FinalAnalyzer:
         appendix = "## 四、分析数据来源\n\n"
         appendix += "### 1. 教授核心贡献分析来源 (代表作)\n"
         analyzed_contrib_papers = self._get_with_warning(contribution_analysis, 'analyzed_papers', [], 'contribution_analysis')
-        if analyzed_contrib_papers:
+        core_contrib_papers = [p for p in analyzed_contrib_papers if self._is_core_journal(p)]
+        if core_contrib_papers:
             # Limit to 6
-            for paper in analyzed_contrib_papers[:6]:
+            for paper in core_contrib_papers[:6]:
                 # Handle both string (title only) and dict (with 'title' key) formats
-                link = self._get_paper_link(paper)
                 if isinstance(paper, str):
-                    appendix += f"- {paper}{link}\n"
+                    appendix += f"- {paper}\n"
                 else:
-                    appendix += f"- {paper.get('title', 'N/A')}{link}\n"
+                    title = paper.get('title', 'N/A')
+                    appendix += f"- {self._format_title_with_link(title, paper)}\n"
         else:
             appendix += "- 无\n"
         appendix += "\n"
@@ -207,17 +221,20 @@ class FinalAnalyzer:
         appendix += "### 2. 领域热点问题分析来源 (高分论文)\n"
         rated_field_papers_list = self._get_with_warning(field_problems_analysis, 'rated_papers', [], 'field_problems_analysis')
         # Filter for high-score papers (weighted_score >= 0.7)
-        rated_field_papers = [p for p in rated_field_papers_list if p.get("weighted_score", 0) >= 0.7]
+        rated_field_papers = [
+            p for p in rated_field_papers_list
+            if p.get("weighted_score", 0) >= 0.7 and self._is_core_journal(p)
+        ]
         
         if rated_field_papers:
             # Limit to 6
             for paper in rated_field_papers[:6]:
                 # Handle both dict and string formats
-                link = self._get_paper_link(paper)
                 if isinstance(paper, dict):
-                    appendix += f"- {paper.get('title', 'N/A')}{link}\n"
+                    title = paper.get('title', 'N/A')
+                    appendix += f"- {self._format_title_with_link(title, paper)}\n"
                 else:
-                    appendix += f"- {paper}{link}\n"
+                    appendix += f"- {paper}\n"
         else:
             appendix += "- 无\n"
         appendix += "\n"
@@ -225,13 +242,16 @@ class FinalAnalyzer:
         appendix += "### 3. 本科生项目建议来源 (复杂度与友好度筛选)\n"
         rated_undergrad_papers_list = self._get_with_warning(undergrad_projects_analysis, 'rated_papers', [], 'undergrad_projects_analysis')
         # Filter papers with moderate to high suitability (weighted_score >= 0.5)
-        rated_undergrad_papers = [p for p in rated_undergrad_papers_list if p.get("score", 0) >= 0.5]
+        rated_undergrad_papers = [
+            p for p in rated_undergrad_papers_list
+            if p.get("score", 0) >= 0.5 and self._is_core_journal(p)
+        ]
         
         if rated_undergrad_papers:
             # Limit to 6
             for paper in rated_undergrad_papers[:6]:
-                link = self._get_paper_link(paper)
-                appendix += f"- {paper.get('title', 'N/A')}{link}\n"
+                title = paper.get('title', 'N/A')
+                appendix += f"- {self._format_title_with_link(title, paper)}\n"
         else:
             appendix += "- 无\n"
         appendix += "\n"

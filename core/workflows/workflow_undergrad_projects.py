@@ -469,6 +469,9 @@ Synthesized Summary of Project Suggestions:""")
                         evaluation['doi'] = paper_metadata['doi']
                     if paper_metadata.get('inspire_url'):
                         evaluation['inspire_url'] = paper_metadata['inspire_url']
+                    evaluation['is_core_journal'] = bool(paper_metadata.get('is_core_journal', False))
+                else:
+                    evaluation['is_core_journal'] = False
 
                 self.cache.set(paper_id, evaluation)
                 time.sleep(1) # Delay after successful API call
@@ -480,6 +483,9 @@ Synthesized Summary of Project Suggestions:""")
                     evaluation['doi'] = paper_metadata['doi']
                 if 'inspire_url' not in evaluation and paper_metadata.get('inspire_url'):
                     evaluation['inspire_url'] = paper_metadata['inspire_url']
+                evaluation['is_core_journal'] = bool(paper_metadata.get('is_core_journal', False))
+            elif 'is_core_journal' not in evaluation:
+                evaluation['is_core_journal'] = False
 
             all_evaluated_papers.append(evaluation)
 
@@ -527,6 +533,7 @@ Synthesized Summary of Project Suggestions:""")
                     "score": p.get('weighted_score', 'N/A'),
                     "doi": p.get('doi'), # Explicitly include DOI
                     "inspire_url": p.get('inspire_url'), # Explicitly include URL
+                    "is_core_journal": bool(p.get('is_core_journal', False)),
                     "details": {
                         "relevance": p.get('relevance_score', 'N/A'),
                         "accessibility": p.get('accessibility_score', 'N/A'),

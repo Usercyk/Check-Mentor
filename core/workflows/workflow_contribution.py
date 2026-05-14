@@ -428,6 +428,7 @@ You MUST provide a JSON response with a `research_directions` key (a list of str
                         single_analysis['doi'] = paper_metadata['doi']
                     if 'inspire_url' not in single_analysis and paper_metadata.get('inspire_url'):
                         single_analysis['inspire_url'] = paper_metadata['inspire_url']
+                    single_analysis['is_core_journal'] = bool(paper_metadata.get('is_core_journal', False))
             else:
                 content = self._load_paper_content(paper['md_filename'])
                 if not content:
@@ -457,6 +458,9 @@ You MUST provide a JSON response with a `research_directions` key (a list of str
                         single_analysis['doi'] = paper_metadata['doi']
                     if paper_metadata.get('inspire_url'):
                         single_analysis['inspire_url'] = paper_metadata['inspire_url']
+                    single_analysis['is_core_journal'] = bool(paper_metadata.get('is_core_journal', False))
+                else:
+                    single_analysis['is_core_journal'] = False
                 
                 # 如果论文有时效性得分，也包含进去
                 if 'recency_score' in paper:
